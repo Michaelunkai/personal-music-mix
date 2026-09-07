@@ -168,7 +168,7 @@ class ScanManager:
         if not isinstance(payload, dict):
             return {"status": "failed", "code": "invalid_heartbeat", "message": "The bridge heartbeat must be a JSON object."}
         page = str(payload.get("page") or "")[:300]
-        if not BrowserBridgeIngestor._history_page(page):
+        if not BrowserBridgeIngestor._history_page(page) and not BrowserBridgeIngestor._favorites_page(page):
             return {"status": "failed", "code": "invalid_history_page", "message": "The bridge heartbeat must originate from the exact history page."}
         heartbeat = {
             "page": page,
@@ -191,15 +191,16 @@ class ScanManager:
     ) -> dict[str, Any]:
         """Persist one connector result, recommendations, and the local plan."""
 
-        ingestion_result = self.history.ingest([item.to_dict() for item in result.items])
-        ingestion = {
-            "received": ingestion_result.received,
-            "normalized": ingestion_result.normalized,
-            "inserted": ingestion_result.stored,
-            "duplicates": ingestion_result.duplicates,
-            "skipped": ingestion_result.skipped,
-            "overview": self.database.overview(),
-        }
+        if result.metadata.get('kind') == 'favorites':
+            with self.database.transaction(immediate=True):
+                for item in {item.track_key:item for item in result.items}.values():
+                    track_id = self.database.upsert_track(item)
+                    self.database.set_like(track_id=track_id, liked=True, profile_id='default', source=BrowserBridgeIngestor.name)
+            ingestion = {'received':len(result.items),'normalized':len(result.items),'inserted':0,'duplicates':0,'skipped':0,'favorites_observed':len(result.items)}
+        else:
+            ingestion_result = self.history.ingest([item.to_dict() for item in result.items])
+            ingestion = {'received':ingestion_result.received,'normalized':ingestion_result.normalized,'inserted':ingestion_result.stored,'duplicates':ingestion_result.duplicates,'skipped':ingestion_result.skipped}
+        ingestion['overview'] = self.database.overview()
         related: list[TrackRecord] = []
         if include_related and self.settings.ytmusicapi_headers_path:
             for row in self.database.list_track_stats(limit=5):
@@ -220,11 +221,11 @@ class ScanManager:
             finished_at=utc_now_iso(),
             items_seen=len(result.items),
             records_scanned=len(result.items),
-            records_emitted=ingestion_result.stored,
-            records_skipped=ingestion_result.skipped,
-            duplicate_records=ingestion_result.duplicates,
+            records_emitted=ingestion['inserted'],
+            records_skipped=ingestion['skipped'],
+            duplicate_records=ingestion['duplicates'],
             recommendations_created=len(recommendations),
-            complete=True,
+            complete=bool(result.metadata.get('complete', True)),
             message=result.message or "History scan completed",
             error_code=result.code,
         )
@@ -287,7 +288,12 @@ class ScanManager:
             self._running = True
         try:
             self.database.save_scan_run(summary)
-            result = BrowserBridgeIngestor.parse_payload(payload, limit=limit or self.settings.scan_limit)
+            previous_ids: dict[str, list[str]] = {}
+            for row in self.database.query_all('SELECT track_key,source_event_id FROM history_events WHERE source=? ORDER BY history_event_id', (BrowserBridgeIngestor.name,)):
+                if row['source_event_id']:
+                    previous_ids.setdefault(row['track_key'], []).append(row['source_event_id'])
+            aliases = json.loads(self.database.get_metadata('browser_bridge_identity_aliases') or '{}')
+            result = BrowserBridgeIngestor.parse_payload(payload, limit=limit or self.settings.scan_limit, previous_ids=previous_ids, identity_aliases=aliases)
             if not result.ok or not result.items:
                 summary = replace(
                     summary,
@@ -298,13 +304,11 @@ class ScanManager:
                 )
                 self.database.save_scan_run(summary)
                 return self._finish(summary, {"connector": result.to_dict(), "attempts": [result.to_dict()]})
-            self.database.set_metadata("browser_bridge_last_sync", utc_now_iso())
-            return self._complete_history_result(
-                summary,
-                result,
-                attempts=[result.to_dict()],
-                include_related=False,
-            )
+            with self.database.transaction(immediate=True):
+                completed = self._complete_history_result(summary, result, attempts=[result.to_dict()], include_related=False)
+                self.database.set_metadata('browser_bridge_identity_aliases', json.dumps(aliases))
+                self.database.set_metadata("browser_bridge_last_sync", utc_now_iso())
+            return completed
         except Exception as exc:
             summary = replace(
                 summary,
@@ -344,7 +348,7 @@ class ScanManager:
         try:
             self.database.save_scan_run(summary)
             event_count = int(self.database.health().get("history_events", 0))
-            if not event_count:
+            if not self.database.health().get('tracks', 0):
                 summary = replace(
                     summary,
                     status="failed",

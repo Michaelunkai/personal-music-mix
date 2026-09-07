@@ -38,6 +38,63 @@ function harness() {
   return { context, node, loads, jumps, configs };
 }
 
+test('an activity error preserves successfully loaded music', async () => {
+  const h = harness();
+  const original = h.context.fetch;
+  h.context.fetch = async url => {
+    if (url === '/api/runs') throw new Error('Activity unavailable');
+    if (url === '/api/recommendations' || url === '/api/library') return {ok:true,text:async()=>JSON.stringify({items:h.context.tracks})};
+    return original(url);
+  };
+  await vm.runInContext('refresh()', h.context);
+  assert.equal(vm.runInContext('state.recommendations.length', h.context),2);
+  assert.match(h.node('#toast').textContent,/Activity unavailable/);
+});
+
+test('unknown favorites disable hearts until preferences recover', async () => {
+  const h=harness(); const original=h.context.fetch;
+  h.context.fetch=async url=> {
+    if(url==='/api/favorites') throw new Error('Preferences unavailable');
+    if(url==='/api/recommendations') return {ok:true,text:async()=>JSON.stringify({items:h.context.tracks})};
+    return original(url);
+  };
+  await vm.runInContext('refresh()',h.context);
+  assert.match(h.node('#recommendations').innerHTML,/data-favorite="[^"]+" disabled/);
+  assert.equal(vm.runInContext('state.favoritesReady',h.context),false);
+  h.context.fetch=original;
+  await vm.runInContext('refresh()',h.context);
+  assert.equal(vm.runInContext('state.favoritesReady',h.context),true);
+});
+
+test('a refresh after saving waits for fresh favorites even if an older poll is pending', async () => {
+  const h = harness();
+  const original = h.context.fetch;
+  let release, calls=0;
+  h.context.fetch = async url => {
+    if (url !== '/api/favorites') return original(url);
+    calls++;
+    if (calls === 1) await new Promise(resolve => {release=resolve;});
+    const keys = calls === 1 ? [] : ['video:aaaaaaaaaaa'];
+    return {ok:true,text:async()=>JSON.stringify({track_keys:keys})};
+  };
+  const poll = vm.runInContext('refresh({silent:true})',h.context);
+  const saved = vm.runInContext('refresh()',h.context);
+  release();
+  await Promise.all([poll,saved]);
+  assert.equal(calls,2);
+  assert.equal(vm.runInContext("state.favorites.has('video:aaaaaaaaaaa')",h.context),true);
+});
+
+test('playlist preview reports available songs rather than requested size', () => {
+  const h=harness();
+  h.context.plan={available:true,plan:{requested_count:20,items:h.context.tracks}};
+  vm.runInContext('renderLatestPlaylist(plan)',h.context);
+  assert.match(h.node('#playlist-preview').innerHTML,/Your mix: 2 songs/);
+  h.context.plan.plan.items=[];
+  vm.runInContext('renderLatestPlaylist(plan)',h.context);
+  assert.match(h.node('#playlist-preview').innerHTML,/Your mix: 0 songs/);
+});
+
 test('Play builds the correct queue; polling does not stop or replace playback', async () => {
   const h = harness();
   assert.match(h.node('#recommendations').innerHTML, /data-play="1"/);

@@ -4,6 +4,39 @@ This file is the durable completion checklist for the user-requested outcome. It
 separates what the application can prove locally from what must be proven with
 the user's currently authenticated YouTube Music account.
 
+## Current continuation gate: 2026-09-08
+
+This section supersedes older current-state claims below; those snapshots are
+historical evidence, not current account connectivity or playback proof.
+
+| User acceptance criterion | Current evidence and state |
+|---|---|
+| Playlist based on THEIR YouTube favorites | **Unverified for the real account**: the saved library has no confirmed provider favorites. Dedicated partial Liked Music collection ingestion, zero-play favorites, and favorite-derived artist affinity pass automated tests. Actual collection still requires the approved browser connection. |
+| Easy refresh whenever requested | **API verified; live UI unverified**: refresh rebuilds a saved mix; regression tests cover concurrent polling, favorites changes, partial endpoint failures, and accurate item counts. Current refresh recalculates the saved library; it does not acquire new-to-library recommendations or promise a different mix. |
+| Listen to recommended songs within this website | **Unverified in a real browser**: embedded-player queue, next/previous, errors and autoplay instructions pass simulated API tests. No audible playback proof. YouTube may prohibit individual tracks; an external link is recovery only, not fulfillment of in-site playback. |
+| Professional deployed real URL | Owner-only production site exists at https://personal-music-mix.michaelovsky55555.chatgpt.site. D1 retains the hosted library/favorites. Saved-source and deployment receipts identify each release. |
+| Automatic correct signed-in account after restart | **Unverified**: approved runtime fails before browser discovery; no authenticated heartbeat. Local launcher and persistence are tested; Chrome/extension activation is a separate gate. |
+| Stored history and account preserved | SQLite backup before restart; semantic cloud-sync fingerprints, conservative history identity reconciliation and per-source favorites avoid duplicate plays and preference replacement. No profile, cookies or account credentials modified. |
+
+Latest regression suite: **24 Python tests and 14 JavaScript tests passed**.
+Tests include provider-ID enrichment/restart, partial liked collections without
+plays, current unlike precedence, timestamp conflict recovery, unchanged sync,
+favorite artist influence, refresh races and player queue behavior.
+
+Exact browser blocker: `privileged native pipe bridge is not available;
+browser-client is not trusted` during `setupAtlasRuntime`, before
+`agent.browsers.list()`. The chief-of-staff task independently reproduced it.
+A scoped host/runtime reconnection is required; a passing prior repair receipt
+does not grant current runtime authorization. No substitute browser route used.
+
+When the host reconnects: freshly discover the required extension identity in
+Person 1 / Profile 2, claim the exact user-approved visible YouTube Music tab,
+inspect the Liked Music collection, verify actual favorites reach the local DB
+and hosted mix, then visibly test Refresh mix, a song Play, player progress,
+pause/resume, Next, and preservation during refresh on the deployed website.
+Use read-only locator centers and the extension synthetic cursor for each action.
+Record actual provider/player states; do not label mocked output as user evidence.
+
 ## Scope and source-of-truth rules
 
 - User scope: the signed-in account already present in approved Chrome at

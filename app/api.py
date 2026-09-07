@@ -204,7 +204,7 @@ def create_app(settings: Settings | None = None):
             parsed_limit = int(limit) if limit is not None else None
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail="limit must be an integer") from exc
-        if not settings.chrome_cdp_url and not settings.ytmusicapi_headers_path and database.health().get("history_events", 0):
+        if not settings.chrome_cdp_url and not settings.ytmusicapi_headers_path and database.health().get("tracks", 0):
             return manager.rebuild_from_local_history()
         return manager.run_now(limit=parsed_limit, include_related=include_related)
 

@@ -66,6 +66,71 @@ def test_repeated_bridge_snapshot_is_idempotent_and_preserves_repeated_rows(tmp_
         assert len(client.get("/api/runs").json()["items"]) == 2
 
 
+def test_prepending_and_reordering_history_does_not_inflate_plays_after_restart(tmp_path):
+    from fastapi.testclient import TestClient
+    from app.api import create_app
+    settings=_settings(tmp_path/'stable.sqlite3')
+    payload=_payload(False)
+    with TestClient(create_app(settings)) as client:
+        client.post('/api/browser/sync',json=payload)
+        payload['items'].insert(0,{'title':'New','artist':'Other','url':'https://music.youtube.com/watch?v=bbbbbbbbbbb'})
+        assert client.post('/api/browser/sync',json=payload).json()['ingestion']['inserted'] == 1
+        payload['items'].reverse()
+        payload['items'][0]['artist']='Enriched artist'
+        assert client.post('/api/browser/sync',json=payload).json()['ingestion']['inserted'] == 0
+    with TestClient(create_app(settings)) as client:
+        assert client.post('/api/browser/sync',json=payload).json()['ingestion']['inserted'] == 0
+        assert client.get('/api/overview').json()['play_count'] == 3
+
+
+def test_provider_event_identity_ignores_position_and_metadata():
+    from app.connectors.bridge import BrowserBridgeIngestor
+    row={'history_id':'provider-1','title':'Song','artist':'Artist','url':'https://music.youtube.com/watch?v=aaaaaaaaaaa'}
+    first=BrowserBridgeIngestor.parse_payload({'page':'https://music.youtube.com/history','items':[row]})
+    second=BrowserBridgeIngestor.parse_payload({'page':'https://music.youtube.com/history','items':[{'title':'Other','url':'https://music.youtube.com/watch?v=bbbbbbbbbbb'}, {**row,'title':'Correct title'}]})
+    assert first.items[0].event_id == second.items[1].event_id
+
+
+def test_provider_id_enrichment_reuses_legacy_slots_and_labels_are_not_timestamps(tmp_path):
+    from fastapi.testclient import TestClient
+    from app.api import create_app
+    settings=_settings(tmp_path/'aliases.sqlite3')
+    payload=_payload(False)
+    with TestClient(create_app(settings)) as client:
+        client.post('/api/browser/sync',json=payload)
+        for i,item in enumerate(payload['items']):
+            item['played_at']='Today'
+        assert client.post('/api/browser/sync',json=payload).json()['ingestion']['inserted'] == 0
+        for i,item in enumerate(payload['items']):
+            item['history_id']=f'provider-{i}'
+        assert client.post('/api/browser/sync',json=payload).json()['ingestion']['inserted'] == 0
+    with TestClient(create_app(settings)) as client:
+        assert client.post('/api/browser/sync',json=payload).json()['ingestion']['inserted'] == 0
+        payload['items'].insert(0,{**payload['items'][0],'history_id':'new-provider-id'})
+        assert client.post('/api/browser/sync',json=payload).json()['ingestion']['inserted'] == 1
+        assert client.get('/api/overview').json()['play_count'] == 3
+
+
+def test_partial_liked_collection_creates_favorites_without_fabricating_plays(tmp_path):
+    from fastapi.testclient import TestClient
+    from app.api import create_app
+    with TestClient(create_app(_settings(tmp_path/'likes.sqlite3'))) as client:
+        payload={'page':'https://music.youtube.com/playlist?list=LM','kind':'favorites','complete':False,'items':[{'title':'Loved','artist':'Artist','url':'https://music.youtube.com/watch?v=aaaaaaaaaaa'}]}
+        for _ in range(2):
+            response=client.post('/api/browser/sync',json=payload)
+            assert response.status_code == 200, response.text
+            assert response.json()['status'] == 'completed'
+        overview=client.get('/api/overview').json()
+        assert overview['play_count'] == 0
+        assert overview['provider_liked_track_count'] == 1
+        assert client.post('/api/scan',json={}).json()['status'] == 'completed'
+        assert client.get('/api/recommendations').json()['items'][0]['track']['title'] == 'Loved'
+        assert client.post('/api/browser/sync',json={**payload,'page':'https://music.youtube.com/playlist?list=ordinary'}).status_code == 422
+        assert client.post('/api/browser/sync',json={**payload,'page':'https://music.youtube.com/history'}).status_code == 422
+        client.post('/api/browser/sync',json={**payload,'items':[]})
+        assert client.get('/api/overview').json()['provider_liked_track_count'] == 1
+
+
 def test_recommendation_runs_remain_persistable_across_syncs(tmp_path: Path):
     pytest.importorskip("fastapi")
     pytest.importorskip("httpx")

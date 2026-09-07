@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 from datetime import datetime, timezone
+from collections import Counter
 from typing import Any, Mapping
 from urllib.parse import parse_qs, urlparse
 
@@ -37,6 +38,14 @@ def _video_id(url: str | None) -> str | None:
 
 class BrowserBridgeIngestor:
     name = "youtube-music-extension"
+
+    @staticmethod
+    def _favorites_page(page: Any) -> bool:
+        try:
+            parsed = urlparse(str(page or ""))
+            return parsed.scheme == 'https' and parsed.netloc.casefold() == 'music.youtube.com' and parsed.path.rstrip('/') == '/playlist' and parse_qs(parsed.query).get('list') == ['LM']
+        except ValueError:
+            return False
 
     @staticmethod
     def _history_page(page: Any) -> bool:
@@ -78,27 +87,29 @@ class BrowserBridgeIngestor:
             or raw.get("played_timestamp")
             or raw.get("time")
         )
-        material = {
-            "page": str(page or "")[:300],
-            "supplied": str(supplied or "")[:160],
-            "played_at": str(played_at or "")[:128],
-            "index": int(index),
-            "title": title.casefold(),
-            "artist": artist.casefold(),
-            "album": album.casefold(),
-            "url": str(url or "")[:300],
-        }
+        track = _video_id(url) or f'{title.casefold()}|{artist.casefold()}'
+        timestamp = None
+        try:
+            parsed_time = datetime.fromisoformat(str(played_at or '').replace('Z', '+00:00'))
+            if parsed_time.tzinfo and 'T' in str(played_at):
+                timestamp = parsed_time.astimezone(timezone.utc).isoformat()
+        except ValueError:
+            pass
+        material = ({'provider_event':supplied_text} if supplied_text else
+                    {'track':track,'timestamp':timestamp} if timestamp else
+                    {'observed_track':track,'occurrence':index})
         digest = hashlib.sha256(
             json.dumps(material, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         return f"bridge:{digest[:48]}"
 
     @staticmethod
-    def parse_payload(payload: Any, *, limit: int = 500) -> ConnectorResult:
+    def parse_payload(payload: Any, *, limit: int = 500, previous_ids: Mapping[str, list[str]] | None = None, identity_aliases: dict[str, str] | None = None) -> ConnectorResult:
         if not isinstance(payload, Mapping):
             return ConnectorResult(status="error", code="invalid_payload", message="The bridge payload must be a JSON object.")
         page = str(payload.get("page") or "")
-        if not BrowserBridgeIngestor._history_page(page):
+        favorites = payload.get('kind') == 'favorites' and BrowserBridgeIngestor._favorites_page(page)
+        if not favorites and (not BrowserBridgeIngestor._history_page(page) or payload.get('kind') == 'favorites'):
             return ConnectorResult(status="error", code="invalid_history_page", message="The bridge may only ingest the exact YouTube Music history page.")
         raw_items = payload.get("items")
         if not isinstance(raw_items, list):
@@ -108,6 +119,8 @@ class BrowserBridgeIngestor:
             captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         items: list[TrackRecord] = []
         seen: set[str] = set()
+        occurrences: Counter = Counter()
+        aliases = identity_aliases if identity_aliases is not None else {}
         for index, raw in enumerate(raw_items[: max(1, min(int(limit), 5000))]):
             if not isinstance(raw, Mapping):
                 continue
@@ -120,17 +133,36 @@ class BrowserBridgeIngestor:
             video_id = _video_id(url)
             key_material = video_id or f"{title.casefold()}|{artist.casefold()}|{album or ''}"
             track_key = f"video:{video_id}" if video_id else "track:" + re.sub(r"[^a-z0-9]+", "-", key_material.casefold()).strip("-")[:180]
-            liked = raw.get("liked") is True
+            liked = favorites or raw.get("liked") is True
             played_at = raw.get("played_at") or raw.get("playedAt") or raw.get("timestamp") or raw.get("played_timestamp") or raw.get("time")
+            try:
+                parsed_time = datetime.fromisoformat(str(played_at or '').replace('Z','+00:00'))
+                played_at = parsed_time.astimezone(timezone.utc).isoformat() if parsed_time.tzinfo and 'T' in str(played_at) else None
+            except ValueError:
+                played_at = None
+            occurrence = occurrences[track_key]
+            occurrences[track_key] += 1
             source_record_id = BrowserBridgeIngestor._row_identity(
                 page,
                 raw,
-                index=index,
+                index=occurrence,
                 title=title,
                 artist=artist,
                 album=album or "",
                 url=url,
             )
+            # Untimestamped snapshots prove an observed multiplicity, not new
+            # plays on every visit. Reuse persisted slots across page shifts.
+            supplied = any(raw.get(key) for key in ('source_record_id','sourceRecordId','history_id','historyId','event_id','eventId','id'))
+            slots = (previous_ids or {}).get(track_key, [])
+            if supplied or played_at:
+                strong_id = source_record_id
+                if strong_id not in aliases:
+                    claimed = set(aliases.values()) | seen
+                    aliases[strong_id] = strong_id if strong_id in slots else next((slot for slot in slots if slot not in claimed), strong_id)
+                source_record_id = aliases[strong_id]
+            elif occurrence < len(slots):
+                source_record_id = slots[occurrence]
             if source_record_id in seen:
                 continue
             seen.add(source_record_id)
@@ -154,7 +186,7 @@ class BrowserBridgeIngestor:
         return ConnectorResult(
             status="ok" if items else "partial",
             items=tuple(items),
-            message=f"Validated {len(items)} rendered history rows from the local extension bridge.",
+            message=(f"Imported {len(items)} visible YouTube favorites; this is a partial collection." if favorites else f"Validated {len(items)} rendered history rows. Untimestamped play counts are a conservative observed minimum."),
             code=None if items else "no_valid_items",
-            metadata={"source": BrowserBridgeIngestor.name, "page": page[:300], "captured_at": captured_at},
+            metadata={"source": BrowserBridgeIngestor.name, "page": page[:300], "captured_at": captured_at, "kind":'favorites' if favorites else 'history', "complete":False},
         )

@@ -1,5 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { latestPlan: null, schedulerRunning: false, recommendations: [], ranked: [], library: [], view: 'mix', query: '', favorites: new Set(), queue: [], queueIndex: 0, player: null, playerReady: null, playerLoading: false, refreshing: false };
+const state = { latestPlan: null, schedulerRunning: false, recommendations: [], ranked: [], library: [], view: 'mix', query: '', favorites: new Set(), favoritesReady:false, queue: [], queueIndex: 0, player: null, playerReady: null, playerLoading: false, refreshing: false };
 
 function toast(message) {
   const node = $("#toast");
@@ -26,7 +26,7 @@ function renderOverview(data) {
   $("#liked-count").textContent = formatNumber(data.liked_track_count);
   $("#taste-copy").textContent = data.liked_track_count
     ? `Your mix uses ${formatNumber(data.provider_liked_track_count)} imported YouTube likes and ${formatNumber(data.local_favorite_count)} dashboard favorites, together with listening history. Favorite songs below to refine your mix.`
-    : "No confirmed favorites have been imported yet. This mix uses saved listening history. Favorite songs below to refine it; dashboard favorites stay local.";
+    : "No confirmed favorites have been imported yet. This mix uses saved listening history. Use the heart buttons to save favorites and refine it.";
 }
 
 function renderRecommendations(items) {
@@ -40,7 +40,7 @@ function renderRecommendations(items) {
     const track = item.track || {};
     const reasons = (item.reasons || []).slice(0, 3).join(" • ");
     const favorite = state.favorites.has(track.track_key);
-    return `<article class="recommendation"><div class="rank">${String(index + 1).padStart(2, "0")}</div><div class="track-detail"><div class="track-title">${escapeHtml(track.title || "Untitled")}</div><div class="track-meta">${escapeHtml(track.artist || "Unknown artist")}${track.album ? ` · ${escapeHtml(track.album)}` : ""}</div><div class="track-reasons">${escapeHtml(reasons)}</div><div class="track-actions"><button class="secondary" data-play="${index}" ${videoId(track) ? "" : "disabled"} aria-label="Play ${escapeHtml(track.title)}">▶ Play</button><button class="secondary" data-favorite="${escapeHtml(track.track_key)}" aria-label="${favorite ? 'Remove favorite' : 'Favorite'} ${escapeHtml(track.title)}" aria-pressed="${favorite}">${favorite ? "♥ Favorited" : "♡ Favorite"}</button></div></div><div class="score">${item.score == null ? '—' : Math.round(item.score * 100)}<span class="confidence">${item.score == null ? 'in your library' : 'match / 100'}</span></div></article>`;
+    return `<article class="recommendation"><div class="rank">${String(index + 1).padStart(2, "0")}</div><div class="track-detail"><div class="track-title">${escapeHtml(track.title || "Untitled")}</div><div class="track-meta">${escapeHtml(track.artist || "Unknown artist")}${track.album ? ` · ${escapeHtml(track.album)}` : ""}</div><div class="track-reasons">${escapeHtml(reasons)}</div><div class="track-actions"><button class="secondary" data-play="${index}" ${videoId(track) ? "" : "disabled"} aria-label="Play ${escapeHtml(track.title)}">▶ Play</button><button class="secondary" data-favorite="${escapeHtml(track.track_key)}" ${state.favoritesReady ? "" : "disabled"} aria-label="${favorite ? 'Remove favorite' : 'Favorite'} ${escapeHtml(track.title)}" aria-pressed="${favorite}">${favorite ? "♥ Favorited" : "♡ Favorite"}</button></div></div><div class="score">${item.score == null ? '—' : Math.round(item.score * 100)}<span class="confidence">${item.score == null ? 'in your library' : 'match / 100'}</span></div></article>`;
   }).join("");
   if (root.innerHTML !== rendered) root.innerHTML = rendered;
 }
@@ -67,10 +67,10 @@ function renderLatestPlaylist(data) {
   const tracks = recommendations.length ? recommendations : items;
   state.latestPlan = plan;
   root.className = "preview";
-  root.innerHTML = `<strong>Automatically generated: ${formatNumber(plan.requested_count || tracks.length)} songs.</strong><br>${escapeHtml(tracks.slice(0, 5).map((item) => {
+  root.innerHTML = `<strong>Your mix: ${formatNumber(tracks.length)} songs.</strong><br>${escapeHtml(tracks.slice(0, 5).map((item) => {
     const track = item.track || item;
     return `${track.title || "Untitled"} — ${track.artist || "Unknown artist"}`;
-  }).join(" · "))}${tracks.length > 5 ? " · …" : ""}<br><span class="muted">Local preview only; no provider write was attempted.</span>`;
+  }).join(" · "))}${tracks.length > 5 ? " · …" : ""}<br><span class="muted">Play this mix here. Saving it to YouTube Music is a separate action.</span>`;
   $("#write-button").disabled = !data.write_enabled;
 }
 
@@ -78,7 +78,7 @@ function renderHealth(data) {
   const pill = $("#health-pill");
   const ok = Boolean(data.ok && data.database?.ok);
   pill.classList.toggle("healthy", ok); pill.classList.toggle("error", !ok);
-  pill.querySelector("span:last-child").textContent = ok ? "Local app connected" : "Connection needs attention";
+  pill.querySelector("span:last-child").textContent = ok ? "Music library connected" : "Connection needs attention";
 }
 
 function renderConnection(data) {
@@ -93,21 +93,38 @@ function renderConnection(data) {
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (char) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "'":"&#39;", '"':"&quot;" }[char])); }
 
 async function refresh({ silent = false } = {}) {
-  if (state.refreshing) return;
-  state.refreshing = true;
-  try {
-    const [health, overview, recs, runs, status, latestPlaylist, connection, favorites, library] = await Promise.all([api("/api/health"), api("/api/overview"), api("/api/recommendations"), api("/api/runs"), api("/api/status"), api("/api/playlists/latest"), api("/api/connection"), api("/api/favorites"), api("/api/library")]);
-    state.favorites = new Set(favorites.track_keys || []);
-    state.ranked = recs.items || []; state.library = library.items || [];
-    renderHealth(health); renderOverview(overview); renderCollection(); renderRuns(runs.items || []); renderLatestPlaylist(latestPlaylist); renderConnection(connection);
-    state.schedulerRunning = Boolean(status.scheduler_running);
-    const schedulerButton = $("#scheduler-button");
-    const bridgeDriven = status.scheduler_mode === "browser_bridge_event_driven";
-    schedulerButton.disabled = bridgeDriven;
-    schedulerButton.textContent = bridgeDriven ? "Automatic bridge sync" : (state.schedulerRunning ? "Pause auto-scan" : "Start auto-scan");
-    schedulerButton.dataset.action = state.schedulerRunning ? "stop" : "start";
-  } catch (error) { renderHealth({ ok: false }); if (!silent) toast(error.message); }
-  finally { state.refreshing = false; }
+  // A save during an older poll must await a fresh response after that poll.
+  state.refreshRequested = true;
+  state.refreshNotify = state.refreshNotify || !silent;
+  if (state.refreshing) return state.refreshing;
+  state.refreshing = (async () => {
+    do {
+      state.refreshRequested = false;
+      const results = await Promise.allSettled(['health','overview','recommendations','runs','status','playlists/latest','connection','favorites','library'].map(path => api(`/api/${path}`)));
+      const [health, overview, recs, runs, status, latestPlaylist, connection, favorites, library] = results.map(result => result.status === 'fulfilled' ? result.value : null);
+      state.favoritesReady = Boolean(favorites);
+      if (favorites) state.favorites = new Set(favorites.track_keys || []);
+      if (recs) state.ranked = recs.items || [];
+      if (library) state.library = library.items || [];
+      renderHealth(health || {ok:false});
+      if (overview) renderOverview(overview);
+      renderCollection();
+      if (runs) renderRuns(runs.items || []);
+      if (latestPlaylist) renderLatestPlaylist(latestPlaylist);
+      if (connection) renderConnection(connection);
+      if (status) {
+        state.schedulerRunning = Boolean(status.scheduler_running);
+        const schedulerButton = $("#scheduler-button");
+        const bridgeDriven = status.scheduler_mode === "browser_bridge_event_driven";
+        schedulerButton.disabled = bridgeDriven;
+        schedulerButton.textContent = bridgeDriven ? "Automatic bridge sync" : (state.schedulerRunning ? "Pause auto-scan" : "Start auto-scan");
+        schedulerButton.dataset.action = state.schedulerRunning ? "stop" : "start";
+      }
+      const failure = results.find(result => result.status === 'rejected');
+      if (failure && state.refreshNotify) toast(`Some information could not refresh: ${failure.reason.message}`);
+    } while (state.refreshRequested);
+  })().finally(() => { state.refreshing = false; state.refreshNotify = false; });
+  return state.refreshing;
 }
 
 function renderCollection() {
@@ -254,6 +271,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (play) return playTrack(Number(play.dataset.play));
     const favorite = event.target.closest("[data-favorite]");
     if (!favorite) return;
+    if (!state.favoritesReady) return toast('Favorites could not load yet. Refresh the page to reconnect.');
     favorite.disabled = true;
     try {
       const result = await api("/api/favorites", { method: "POST", body: JSON.stringify({ track_key: favorite.dataset.favorite, liked: !state.favorites.has(favorite.dataset.favorite) }) });
@@ -268,6 +286,6 @@ document.addEventListener("DOMContentLoaded", () => {
   refresh();
   // Bridge sync is event-driven in the extension; polling keeps the visible
   // dashboard current without requiring a user refresh or button click.
-  window.setInterval(() => refresh({ silent: true }), 5000);
+  window.setInterval(() => { if (!document.hidden && !state.refreshing) refresh({ silent: true }); }, 30000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh({ silent: true }); });
 });

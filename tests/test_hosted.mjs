@@ -31,6 +31,9 @@ test('built hosted app persists import, favorites, refresh and full library', as
   await call('/api/scan',{});
   assert.equal((await (await call('/api/playlists/latest')).json()).plan.requested_count,2);
   assert.equal((await (await call('/api/library')).json()).count,2);
+  await call('/api/playlists/preview',{name:'Evening favorites'});
+  await call('/api/scan',{});
+  assert.equal((await (await call('/api/playlists/latest')).json()).plan.name,'Evening favorites');
   await call('/api/favorites',{...favorite,liked:false});
   assert.deepEqual((await (await call('/api/favorites')).json()).track_keys,[]);
   assert.equal((await call('/api/favorites',favorite,{Origin:'https://untrusted.example'})).status,403);
@@ -40,4 +43,29 @@ test('built hosted app persists import, favorites, refresh and full library', as
   const page=await call('/'); assert.equal(page.status,200);
   assert.equal(page.headers.get('Referrer-Policy'),'strict-origin-when-cross-origin');
   assert.match(await page.text(),/data-view="favorites"/);
+  // Later local choices sync; an older import cannot overwrite the cloud choice.
+  const dated = {...tracks[0],local_favorite:true,local_favorite_updated_at:'2020-01-01T00:00:00Z'};
+  await call('/api/sync/import',{tracks:[dated]});
+  assert.deepEqual((await (await call('/api/favorites')).json()).track_keys,[dated.track_key]);
+  await call('/api/favorites',{track_key:dated.track_key,liked:false});
+  await call('/api/sync/import',{tracks:[dated]});
+  assert.deepEqual((await (await call('/api/favorites')).json()).track_keys,[]);
+  dated.local_favorite_updated_at='2090-01-01T00:00:00Z';
+  await call('/api/sync/import',{tracks:[dated]});
+  assert.deepEqual((await (await call('/api/favorites')).json()).track_keys,[dated.track_key]);
+  await call('/api/favorites',{track_key:dated.track_key,liked:false});
+  await call('/api/sync/import',{tracks:[dated]});
+  assert.deepEqual((await (await call('/api/favorites')).json()).track_keys,[], 'A website action wins even when the local clock is ahead');
+  dated.local_favorite=false; dated.local_favorite_updated_at='2090-01-01T00:00:01Z';
+  await call('/api/sync/import',{tracks:[dated]});
+  assert.deepEqual((await (await call('/api/favorites')).json()).track_keys,[]);
+});
+
+test('favorite artists influence other library songs and zero-play favorites are valid', async () => {
+  const {rankTracks}=await import('../worker/domain.js');
+  const rows=[{track_key:'a',title:'Favorite',artist:'A',play_count:0,liked_count:0},{track_key:'b',title:'Another A',artist:'A',play_count:1,liked_count:0},{track_key:'c',title:'Another C',artist:'C',play_count:1,liked_count:0}];
+  const plain=rankTracks(rows,new Set());
+  const favored=rankTracks(rows,new Set(['a']));
+  assert.ok(favored.find(row=>row.track.track_key==='b').score > plain.find(row=>row.track.track_key==='b').score || favored.find(row=>row.track.track_key==='b').score > favored.find(row=>row.track.track_key==='c').score);
+  assert.ok(Number.isFinite(rankTracks([rows[0]],new Set(['a']))[0].score));
 });

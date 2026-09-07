@@ -22,7 +22,8 @@ async function rebuild(db) {
   const items = rankTracks(rows,favorites);
   const run = {run_id:crypto.randomUUID(),status:'completed',items_seen:rows.length,finished_at:now(),message:'Mix refreshed from saved listening history and favorites.'};
   const previous = await readState(db,'runs') || [];
-  const plan = {name:'Your personal mix',status:'preview',requested_count:items.length,items:items.map(row=>row.track),generated_at:now()};
+  const oldPlan = await readState(db,'playlist');
+  const plan = {name:oldPlan?.name || 'Your personal mix',status:'preview',requested_count:items.length,items:items.map(row=>row.track),generated_at:now()};
   await db.batch([saveState(db,'recommendations',items),saveState(db,'playlist',plan),saveState(db,'runs',[run,...previous].slice(0,20))]);
   return {status:'completed',run,playlist_preview:plan};
 }
@@ -44,9 +45,9 @@ async function handleApi(request,env,path) {
     if (!tracks.length) return json({detail:'An empty import will not replace your library'},422);
     const statements = tracks.flatMap(track=>[
       db.prepare('INSERT INTO music_library(track_key,payload) VALUES(?,?) ON CONFLICT(track_key) DO UPDATE SET payload=excluded.payload').bind(track.track_key,JSON.stringify(track)),
-      db.prepare('INSERT OR IGNORE INTO music_favorites(track_key,liked,updated_at) VALUES(?,?,?)').bind(track.track_key,Number(track.local_favorite),now()),
+      ...(track.local_favorite_updated_at ? [db.prepare('INSERT INTO music_favorites(track_key,liked,updated_at) VALUES(?,?,?) ON CONFLICT(track_key) DO UPDATE SET liked=excluded.liked,updated_at=excluded.updated_at WHERE julianday(excluded.updated_at) > julianday(music_favorites.updated_at)').bind(track.track_key,Number(track.local_favorite),track.local_favorite_updated_at)] : []),
     ]);
-    // One D1 batch makes the imported snapshot and its receipt atomic.
+    // Each chunk and its receipt are committed together; retries are idempotent.
     await db.batch([...statements,saveState(db,'sync',{received_at:now(),source_sync_at:payload.last_sync_at || null,tracks:tracks.length,source:'local_browser_bridge'})]);
     return json({...(await rebuild(db)),imported:tracks.length});
   }
@@ -54,7 +55,7 @@ async function handleApi(request,env,path) {
     const payload = await body();
     if(typeof payload.track_key !== 'string' || typeof payload.liked !== 'boolean') return json({detail:'A track and boolean liked value are required'},422);
     if(!await db.prepare('SELECT track_key FROM music_library WHERE track_key=?').bind(payload.track_key).first()) return json({detail:'Track not found'},404);
-    await db.prepare('INSERT INTO music_favorites(track_key,liked,updated_at) VALUES(?,?,?) ON CONFLICT(track_key) DO UPDATE SET liked=excluded.liked,updated_at=excluded.updated_at').bind(payload.track_key,Number(payload.liked),now()).run();
+    await db.prepare("INSERT INTO music_favorites(track_key,liked,updated_at) VALUES(?,?,?) ON CONFLICT(track_key) DO UPDATE SET liked=excluded.liked,updated_at=CASE WHEN julianday(excluded.updated_at)>julianday(music_favorites.updated_at) THEN excluded.updated_at ELSE strftime('%Y-%m-%dT%H:%M:%fZ',music_favorites.updated_at,'+0.001 seconds') END").bind(payload.track_key,Number(payload.liked),now()).run();
     return json({saved:true,liked:payload.liked,source:'dashboard',mix_status:(await rebuild(db)).status});
   }
   if(path === '/api/scan' && method === 'POST') return json(await rebuild(db));
@@ -70,7 +71,7 @@ async function handleApi(request,env,path) {
   if(path === '/api/recommendations') {const items = await readState(db,'recommendations') || [];return json({items,count:items.length});}
   if(path === '/api/playlists/latest') {const plan = await readState(db,'playlist');return json({available:!!plan,plan,write_enabled:false});}
   if(path === '/api/runs') return json({items:await readState(db,'runs') || []});
-  if(path === '/api/favorites') { const {favorites} = await library(db); return json({track_keys:[...favorites],source:'dashboard'}); }
+  if(path === '/api/favorites') { const {results:records} = await db.prepare('SELECT track_key,liked,updated_at FROM music_favorites').all(); return json({track_keys:records.filter(row=>row.liked).map(row=>row.track_key),records,source:'dashboard'}); }
   if(path === '/api/status') return json({scheduler_running:false,scheduler_mode:'browser_bridge_event_driven',scheduler_healthy:true});
   const {rows,favorites} = await library(db);
   const plays = rows.reduce((sum,row)=>sum+row.play_count,0);

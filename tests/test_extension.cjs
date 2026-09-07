@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const path = require('node:path');
 const source = name => fs.readFileSync(path.join(__dirname, '../extension', name), 'utf8');
 
-function contentHarness() {
+function contentHarness({label='', pressed=null, title='A song', favorites=false} = {}) {
   const timers = new Map();
   const messages = [];
   const listeners = [];
@@ -13,18 +13,21 @@ function contentHarness() {
   let fetches = 0;
   const row = {
     querySelector(selector) {
-      if (selector.startsWith('[data-title]')) return { textContent: 'A song' };
+      if (selector.startsWith('[data-title]')) return { textContent: title };
       if (selector.startsWith('a[href*="watch"')) return { href: 'https://music.youtube.com/watch?v=abc12345678' };
       return null;
     },
     getAttribute: () => null,
-    textContent: 'A song',
+    textContent: title,
+    closest: () => null,
+    querySelectorAll: selector => selector === '[aria-label], [title]' && label ? [{getAttribute:name=>name==='aria-label'?label:name==='aria-pressed'?pressed:null}] : [],
   };
   const context = vm.createContext({
-    location: { hostname: 'music.youtube.com', pathname: '/history', href: 'https://music.youtube.com/history' },
+    URL,
+    location: { hostname: 'music.youtube.com', pathname: favorites ? '/playlist' : '/history', href: favorites ? 'https://music.youtube.com/playlist?list=LM' : 'https://music.youtube.com/history' },
     document: {
       documentElement: {}, body: { innerText: 'History' },
-      querySelector: () => null,
+      querySelector: selector => selector.startsWith('ytmusic-browse-response') ? {querySelectorAll:()=>[row]} : null,
       querySelectorAll: selector => selector.includes('ytmusic-responsive-list-item-renderer') ? [row] : [],
     },
     MutationObserver: class { observe() {} },
@@ -62,7 +65,20 @@ test('failed delivery retries identical rows and only acknowledged delivery dedu
   assert.equal(h.messages.length, 2);
   h.messages[1].callback({ ok: true });
   h.listeners[0]({ type: 'sync-now' }); h.runTimer(900);
-  assert.equal(h.messages.length, 2);
+  assert.equal(h.messages.length, 3, 'Explicit sync resends acknowledged rows for recovery');
+});
+
+test('only a selected positive like control or liked-collection membership marks favorites', () => {
+  for (const [options,expected] of [
+    [{label:'Like',pressed:'true'},true], [{label:'Like',pressed:'false'},false],
+    [{label:'Disliked',pressed:'true'},false], [{label:'Thumbs up'},false],
+    [{title:'I liked it'},false], [{label:'Shuffle',pressed:'true'},false],
+    [{favorites:true},true],
+  ]) {
+    const h=contentHarness(options); vm.runInContext(source('content.js'),h.context);h.runTimer(900);
+    assert.equal(h.messages[0].message.payload.items[0].liked,expected,JSON.stringify(options));
+    if(options.favorites) assert.equal(h.messages[0].message.payload.kind,'favorites');
+  }
 });
 
 test('reinjection does not create duplicate collectors or message listeners', () => {

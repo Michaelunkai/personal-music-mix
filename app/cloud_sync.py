@@ -43,10 +43,18 @@ def publish_library(database, config_path: Path | None = None) -> dict:
         if parsed.scheme != "https" or not parsed.hostname or not parsed.hostname.endswith(".chatgpt.site") or parsed.path not in {"", "/"} or parsed.username or parsed.query:
             raise ValueError("Invalid private site destination")
         token = _unprotect(config["encrypted_token"])
-        tracks = database.list_track_stats(limit=10000)
-        fingerprint = hashlib.sha256(json.dumps(tracks, sort_keys=True).encode()).hexdigest()
+        # Pull before publishing, including during otherwise unchanged cycles.
+        request = Request(origin.rstrip("/") + "/api/favorites", headers={"OAI-Sites-Authorization": "Bearer " + token})
+        with urlopen(request, timeout=20) as response:
+            favorites = json.load(response)
+        merged = database.merge_dashboard_favorites(favorites.get("records", []))
+        published_fields = ('track_key','title','artist','album','video_id','url','play_count','liked_count','provider_liked_count','like_events','latest_played_at','local_favorite','local_favorite_updated_at')
+        tracks = [{key:row.get(key) for key in published_fields} for row in database.list_track_stats(limit=10000)]
+        fingerprint = hashlib.sha256(json.dumps({"origin":origin.rstrip("/"),"tracks":tracks}, sort_keys=True).encode()).hexdigest()
         if database.get_metadata("cloud_synced_fingerprint") == fingerprint:
-            return {"state": "unchanged"}
+            result = {"state": "unchanged", "tracks": len(tracks), "origin": origin}
+            database.set_metadata("cloud_sync_status", json.dumps(result))
+            return result
         for offset in range(0, len(tracks), 20):
             body = json.dumps({"tracks": tracks[offset:offset+20], "last_sync_at": database.get_metadata("browser_bridge_last_sync")}).encode("utf-8")
             request = Request(origin.rstrip("/") + "/api/sync/import", data=body, headers={"Content-Type": "application/json", "OAI-Sites-Authorization": "Bearer " + token}, method="POST")
@@ -54,7 +62,7 @@ def publish_library(database, config_path: Path | None = None) -> dict:
                 result = json.load(response)
             if result.get("status") != "completed":
                 raise RuntimeError("Private site did not confirm the library update")
-        result = {"state": "synced", "tracks": len(tracks), "origin": origin}
+        result = {"state": "synced", "tracks": len(tracks), "favorites_merged": merged, "origin": origin}
         database.set_metadata("cloud_synced_fingerprint", fingerprint)
     except Exception as exc:
         # Exception messages may contain request details. Persist only the type.

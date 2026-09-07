@@ -17,7 +17,7 @@ import threading
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -575,17 +575,22 @@ class Database:
         track_key: str | None = None,
     ) -> None:
         row = connection.execute(
-            """SELECT like_id, liked FROM user_likes
+            """SELECT like_id, liked, updated_at FROM user_likes
                WHERE profile_id = ? AND (track_id = ? OR (track_id IS NULL AND video_id = ?))
                ORDER BY like_id LIMIT 1""",
             (profile_id, track_id, video_id),
         ).fetchone()
         new_value = int(bool(liked))
+        updated_at = utc_now_iso()
+        if row and row['updated_at']:
+            previous_time = datetime.fromisoformat(str(row['updated_at']).replace('Z','+00:00'))
+            if previous_time.tzinfo and previous_time >= datetime.fromisoformat(updated_at.replace('Z','+00:00')):
+                updated_at = (previous_time + timedelta(milliseconds=1)).isoformat().replace('+00:00','Z')
         if row is None:
             connection.execute(
                 """INSERT INTO user_likes(profile_id, track_id, track_key, video_id, liked, source, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (profile_id, track_id, track_key, video_id, new_value, source or "local", utc_now_iso()),
+                (profile_id, track_id, track_key, video_id, new_value, source or "local", updated_at),
             )
             delta = new_value
         else:
@@ -594,7 +599,7 @@ class Database:
                 """UPDATE user_likes SET track_id = ?, track_key = COALESCE(?, track_key),
                    video_id = COALESCE(?, video_id), liked = ?, source = ?, updated_at = ?
                    WHERE like_id = ?""",
-                (track_id, track_key, video_id, new_value, source or "local", utc_now_iso(), int(row["like_id"])),
+                (track_id, track_key, video_id, new_value, source or "local", updated_at, int(row["like_id"])),
             )
             delta = new_value - old_value
         if delta:
@@ -857,9 +862,14 @@ class Database:
                       c.title, COALESCE(c.artist, 'Unknown artist') AS artist, c.artists_json, c.album,
                       c.url, c.video_id, c.first_seen_at, c.last_seen_at, c.liked_count, c.source, c.updated_at,
                       COUNT(h.history_event_id) AS play_count, MAX(h.played_at) AS latest_played_at,
-                      COALESCE(SUM(CASE WHEN h.liked = 1 THEN 1 ELSE 0 END), 0) AS like_events,
+                      CASE WHEN EXISTS(SELECT 1 FROM user_likes u WHERE u.track_id=c.track_id AND u.profile_id!='dashboard')
+                           THEN COALESCE((SELECT SUM(u.liked) FROM user_likes u WHERE u.track_id=c.track_id AND u.profile_id!='dashboard'),0)
+                           ELSE COALESCE(SUM(CASE WHEN h.liked = 1 THEN 1 ELSE 0 END),0) END AS like_events,
+                      COALESCE((SELECT SUM(u.liked) FROM user_likes u WHERE u.track_id=c.track_id AND u.profile_id!='dashboard'),0) AS provider_liked_count,
                       EXISTS(SELECT 1 FROM user_likes u WHERE u.track_id = c.track_id
-                             AND u.profile_id = 'dashboard' AND u.liked = 1) AS local_favorite
+                             AND u.profile_id = 'dashboard' AND u.liked = 1) AS local_favorite,
+                      (SELECT u.updated_at FROM user_likes u WHERE u.track_id = c.track_id
+                             AND u.profile_id = 'dashboard' ORDER BY u.updated_at DESC LIMIT 1) AS local_favorite_updated_at
                FROM canonical_tracks c LEFT JOIN history_events h ON h.track_id = c.track_id
                GROUP BY c.track_id
                ORDER BY play_count DESC, latest_played_at DESC, c.title COLLATE NOCASE
@@ -970,6 +980,31 @@ class Database:
             return int(track_id)
 
     upsert_like = set_like
+
+    def merge_dashboard_favorites(self, records: Sequence[Mapping[str, Any]]) -> int:
+        """Merge newer private-site choices without changing provider likes."""
+        changed = 0
+        with self.transaction(immediate=True) as connection:
+            for record in records:
+                if record.get("liked") not in (0, 1, False, True):
+                    continue
+                timestamp = str(record.get("updated_at") or "")
+                try:
+                    parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        continue
+                except ValueError:
+                    continue
+                track = connection.execute("SELECT track_id,video_id,track_key FROM canonical_tracks WHERE track_key=?", (record.get("track_key"),)).fetchone()
+                if track is None:
+                    continue
+                previous = connection.execute("SELECT updated_at FROM user_likes WHERE track_id=? AND profile_id='dashboard'", (track["track_id"],)).fetchone()
+                if previous and parsed <= datetime.fromisoformat(str(previous["updated_at"]).replace("Z", "+00:00")):
+                    continue
+                self._set_like_connection(connection, track_id=track["track_id"], video_id=track["video_id"], track_key=track["track_key"], liked=bool(record["liked"]), source="private_site", profile_id="dashboard")
+                connection.execute("UPDATE user_likes SET updated_at=? WHERE track_id=? AND profile_id='dashboard'", (timestamp, track["track_id"]))
+                changed += 1
+        return changed
 
     def create_recommendation_run(
         self,

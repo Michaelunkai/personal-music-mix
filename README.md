@@ -18,6 +18,19 @@ the Git-ignored `data/cloud-sync.json`; it is never delivered to page JavaScript
 Configuration is scoped to the exact production database so tests cannot upload
 fixture data. A failed upload is retried without claiming a successful cloud sync.
 
+Favorites now synchronize in both directions. New explicit choices advance past
+the stored preference timestamp, so clock differences and older retries cannot
+undo a website change. Favorite artists also influence other songs by that artist.
+Refresh recalculates a mix from the saved library; it does not currently discover
+new songs outside that library or guarantee a different selection every time.
+
+The bridge accepts visible rows from the exact history page and the YouTube Music
+Liked Music collection (`/playlist?list=LM`). Favorites are stored without adding
+fake listening events. These snapshots are partial: missing rows never remove a
+favorite. Untimestamped history counts are conservative observed minimums.
+Live activation of the revised bridge and real embedded playback remain awaiting
+the approved browser runtime; passing simulated-player tests is not audio proof.
+
 This project is a local-first recommendation dashboard for an authenticated YouTube Music account. It learns from rendered YouTube Music history and liked signals, stores a private local SQLite model, ranks songs with an explainable deterministic scorer, and previews a playlist before any provider-side write.
 
 ## What is real and what is guarded

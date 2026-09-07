@@ -78,8 +78,9 @@ class RecommendationEngine:
         artist_plays: dict[str, float] = {}
         for row in rows:
             artist = str(row.get("artist") or "Unknown artist").casefold()
-            artist_plays[artist] = artist_plays.get(artist, 0.0) + _number(row.get("play_count"))
-        max_artist_plays = max(artist_plays.values(), default=1.0)
+            favorite = bool(row.get("local_favorite") or _number(row.get("liked_count")) > 0 or _number(row.get("like_events")) > 0)
+            artist_plays[artist] = artist_plays.get(artist, 0.0) + _number(row.get("play_count")) + (max(1.0, max_plays) if favorite else 0.0)
+        max_artist_plays = max(1.0, max(artist_plays.values(), default=1.0))
         seen_titles = {str(row.get("title") or "").casefold() for row in rows}
         scored: dict[str, Recommendation] = {}
 
@@ -92,7 +93,7 @@ class RecommendationEngine:
             frequency = min(1.0, math.log1p(plays) / max(1.0, math.log1p(max_plays)))
             # A favorite is a preference, not a fraction of listening events.
             # Replaying it must not dilute that preference.
-            like_signal = 1.0 if likes > 0 else 0.0
+            like_signal = 1.0 if likes > 0 or row.get("local_favorite") else 0.0
             recent = _recency(row.get("latest_played_at") or row.get("last_played_at") or track.played_at)
             artist_affinity = min(1.0, artist_plays.get(track.artist.casefold(), 0.0) / max_artist_plays)
             score = 0.48 * frequency + 0.27 * like_signal + 0.15 * recent + 0.10 * artist_affinity

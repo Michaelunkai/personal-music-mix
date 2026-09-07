@@ -39,3 +39,13 @@ def test_favorite_signal_is_not_diluted_by_repeat_listening():
     favorite = engine.recommend([{**base, "liked_count": 1, "local_favorite": True}])[0]
     assert round(favorite.score - plain.score, 2) == 0.27
     assert "saved as a dashboard favorite" in favorite.reasons
+
+
+def test_zero_play_favorite_and_favorite_artist_affinity():
+    engine=RecommendationEngine()
+    seed={'track_key':'video:a','title':'Favorite','artist':'A','play_count':0,'liked_count':1,'local_favorite':True}
+    assert engine.recommend([seed])[0].score > 0
+    rows=[seed,{'track_key':'video:b','title':'Other A','artist':'A','play_count':1}, {'track_key':'video:c','title':'Other C','artist':'C','play_count':1}]
+    scores={item.track.track_key:item.score for item in engine.recommend(rows)}
+    assert scores['video:b'] > scores['video:c']
+    assert engine.recommend([]) == []

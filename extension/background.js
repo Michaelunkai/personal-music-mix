@@ -5,7 +5,7 @@ const HISTORY_URL_PATTERN = "https://music.youtube.com/history*";
 function isHistoryUrl(url) {
   try {
     const parsed = new URL(url || "");
-    return parsed.protocol === "https:" && parsed.hostname === "music.youtube.com" && parsed.pathname.replace(/\/+$/, "") === "/history";
+    return parsed.protocol === "https:" && parsed.hostname === "music.youtube.com" && (parsed.pathname.replace(/\/+$/, "") === "/history" || (parsed.pathname === '/playlist' && parsed.searchParams.get('list') === 'LM'));
   } catch (_) {
     return false;
   }
@@ -28,7 +28,7 @@ async function requestHistorySync(tabId) {
 }
 
 async function requestHistoryTabsSync() {
-  const tabs = await chrome.tabs.query({ url: [HISTORY_URL_PATTERN] });
+  const tabs = await chrome.tabs.query({ url: [HISTORY_URL_PATTERN, 'https://music.youtube.com/playlist*'] });
   await Promise.all(tabs.filter((tab) => isHistoryUrl(tab.url)).map((tab) => requestHistorySync(tab.id)));
 }
 
@@ -67,7 +67,7 @@ async function sendToLocalApp(payload) {
   let result = {};
   try { result = text ? JSON.parse(text) : {}; } catch { result = { message: text }; }
   if (!response.ok) throw new Error(result.detail || result.message || `Local app returned ${response.status}`);
-  if (result.status === "error" || result.status === "blocked") throw new Error(result.message || "Local app rejected the history sync");
+  if (!['completed','partial'].includes(result.status)) throw new Error(result.message || "Local app rejected the history sync");
   return result;
 }
 

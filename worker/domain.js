@@ -13,6 +13,7 @@ export function normalizeImport(payload) {
       liked_count: count(row.provider_liked_count ?? (count(row.liked_count) - (row.local_favorite ? 1 : 0))),
       like_events: count(row.like_events), latest_played_at: row.latest_played_at || null,
       local_favorite: Boolean(row.local_favorite),
+      local_favorite_updated_at: Number.isFinite(Date.parse(row.local_favorite_updated_at)) ? new Date(row.local_favorite_updated_at).toISOString() : null,
     };
   });
 }
@@ -20,7 +21,10 @@ export function normalizeImport(payload) {
 export function rankTracks(rows, favorites, limit = 20, now = Date.now()) {
   const maxPlays = Math.max(1, ...rows.map(r => r.play_count));
   const affinity = new Map();
-  for (const row of rows) affinity.set(row.artist.toLowerCase(), (affinity.get(row.artist.toLowerCase()) || 0) + row.play_count);
+  for (const row of rows) {
+    const liked = favorites.has(row.track_key) || row.liked_count > 0 || row.like_events > 0;
+    affinity.set(row.artist.toLowerCase(), (affinity.get(row.artist.toLowerCase()) || 0) + row.play_count + (liked ? maxPlays : 0));
+  }
   const maxAffinity = Math.max(1, ...affinity.values());
   return rows.map(row => {
     const local = favorites.has(row.track_key);
