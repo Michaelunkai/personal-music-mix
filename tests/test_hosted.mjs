@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import worker from '../dist/server/index.js';
+import {normalizeImport,rankTracks} from '../worker/domain.js';
 
 function database() {
   const sqlite = new DatabaseSync(':memory:');
@@ -59,6 +60,50 @@ test('built hosted app persists import, favorites, refresh and full library', as
   dated.local_favorite=false; dated.local_favorite_updated_at='2090-01-01T00:00:01Z';
   await call('/api/sync/import',{tracks:[dated]});
   assert.deepEqual((await (await call('/api/favorites')).json()).track_keys,[]);
+});
+
+test('fresh discoveries get a reserved share and disappear when unsupported', () => {
+  const rows=normalizeImport({tracks:[...Array.from({length:30},(_,i)=>({track_key:'seed'+i,title:'Saved '+i,artist:'A',play_count:100,liked_count:1})),
+    ...Array.from({length:8},(_,i)=>({track_key:'new'+i,title:'New '+i,artist:'B',video_id:'b'.repeat(11),source:'favorite_discovery',discovery_seeds:[{track_key:'seed0',title:'My favorite',expires_at:Date.now()/1000+300}]}))]});
+  const items=rankTracks(rows,new Set());
+  assert.equal(items.length,20);
+  assert.equal(items.filter(row=>row.source==='favorite_discovery').length,6);
+  assert.ok(items.filter(row=>row.source==='favorite_discovery').every(row=>row.reasons.includes('recommended from your favorite: My favorite') && !row.reasons.some(reason=>reason.includes('history'))));
+  rows[0].liked_count=0;
+  assert.equal(rankTracks(rows,new Set()).filter(row=>row.source==='favorite_discovery').length,0);
+  assert.ok(rankTracks(rows,new Set(['new0']),100).some(row=>row.track.track_key==='new0'));
+});
+
+test('hosted refresh queues discovery and only acknowledged delivery clears pending',async()=>{
+  const env={DB:database()};
+  const call=(path,payload)=>worker.fetch(new Request('https://test.chatgpt.site'+path,payload===undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),env);
+  const seed={track_key:'seed',title:'Seed',artist:'A',video_id:'a'.repeat(11),play_count:10};
+  const candidate={track_key:'new',title:'Discovery',artist:'B',video_id:'b'.repeat(11),source:'favorite_discovery',discovery_seeds:[{track_key:'seed',title:'Seed',expires_at:Date.now()/1000+300}]};
+  await call('/api/sync/import',{tracks:[seed,candidate]});
+  await call('/api/favorites',{track_key:'seed',liked:true});
+  assert.equal((await (await call('/api/recommendations')).json()).count,2);
+  await call('/api/scan',{});
+  const first=(await (await call('/api/favorites')).json()).discovery_request;
+  assert.ok(first.id);
+  assert.equal((await (await call('/api/connection')).json()).discovery.pending,true);
+  await call('/api/sync/heartbeat',{discovery:{state:'temporarily_unavailable',request_id:null,candidate_count:1,seed_count:1,checked_at:new Date().toISOString()}});
+  const retrying=await (await call('/api/connection')).json();
+  assert.equal(retrying.discovery.pending,true);
+  assert.match(retrying.message,/temporarily unavailable/);
+  await call('/api/sync/heartbeat',{discovery:{state:'updated',request_id:first.id,candidate_count:1,seed_count:1,checked_at:new Date().toISOString()}});
+  const connection=await (await call('/api/connection')).json();
+  assert.equal(connection.companion.online,true);
+  assert.equal(connection.browser_bridge.ready,false);
+  assert.equal(connection.discovery.pending,false);
+  await call('/api/scan',{});
+  assert.notEqual((await (await call('/api/favorites')).json()).discovery_request.id,first.id);
+  await call('/api/favorites',{track_key:'seed',liked:false});
+  assert.equal((await (await call('/api/recommendations')).json()).count,1);
+  await call('/api/favorites',{track_key:'seed',liked:true});
+  candidate.discovery_seeds[0].expires_at=Date.now()/1000-1;
+  await call('/api/sync/import',{tracks:[candidate]});
+  assert.equal((await (await call('/api/recommendations')).json()).count,1);
+  assert.equal((await (await call('/api/playlists/latest')).json()).plan.requested_count,1);
 });
 
 test('favorite artists influence other library songs and zero-play favorites are valid', async () => {

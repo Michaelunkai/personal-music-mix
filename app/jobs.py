@@ -225,7 +225,7 @@ class ScanManager:
                 if seed:
                     related.extend(self.api_connector.related(seed, limit=5).items)
         recommendations = self.engine.recommend(
-            self.database.list_track_stats(limit=self.settings.scan_limit),
+            self.database.list_track_stats(limit=10000),
             related_candidates=related,
             limit=self.settings.recommendation_limit,
         )
@@ -376,7 +376,7 @@ class ScanManager:
                 self.database.save_scan_run(summary)
                 return self._finish(summary, {})
             recommendations = self.engine.recommend(
-                self.database.list_track_stats(limit=self.settings.scan_limit),
+                self.database.list_track_stats(limit=10000),
                 limit=self.settings.recommendation_limit,
             )
             self.database.save_recommendations(

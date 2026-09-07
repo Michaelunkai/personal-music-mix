@@ -21,8 +21,14 @@ fixture data. A failed upload is retried without claiming a successful cloud syn
 Favorites now synchronize in both directions. New explicit choices advance past
 the stored preference timestamp, so clock differences and older retries cannot
 undo a website change. Favorite artists also influence other songs by that artist.
-Refresh recalculates a mix from the saved library; it does not currently discover
-new songs outside that library or guarantee a different selection every time.
+Refresh immediately recalculates the mix and queues a public related-song request
+from current favorites. The local app checks that request every 30 seconds, queries
+up to three favorites with eight candidates each, and publishes the result. Six
+places in a 20-song mix are reserved for available new discoveries. Suggestions
+expire after six hours; failed requests retry after five minutes. No account
+credentials are needed for public discovery, and no plays or favorites are invented.
+The site reports when the local app is offline or a request is pending. A provider
+may return the same songs on another request; a different selection is not guaranteed.
 
 The bridge accepts visible rows from the exact history page and the YouTube Music
 Liked Music collection (`/playlist?list=LM`). Favorites are stored without adding

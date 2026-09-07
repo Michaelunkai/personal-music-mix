@@ -74,6 +74,11 @@ class RecommendationEngine:
         limit = max(1, min(int(limit), 200))
         excluded = exclude_keys or set()
         rows = [row for row in stats if str(row.get("track_key") or "") not in excluded]
+        active = {row['track_key'] for row in rows if row.get('local_favorite') or _number(row.get('liked_count')) > 0 or _number(row.get('like_events')) > 0}
+        moment = datetime.now(timezone.utc).timestamp()
+        def seeds_for(row):
+            return [seed for seed in row.get('discovery_seeds', []) if seed.get('track_key') in active and _number(seed.get('expires_at')) > moment]
+        rows = [row for row in rows if row.get('source') != 'favorite_discovery' or _number(row.get('play_count')) > 0 or row['track_key'] in active or seeds_for(row)]
         max_plays = max((_number(row.get("play_count")) for row in rows), default=1.0)
         artist_plays: dict[str, float] = {}
         for row in rows:
@@ -99,6 +104,10 @@ class RecommendationEngine:
             score = 0.48 * frequency + 0.27 * like_signal + 0.15 * recent + 0.10 * artist_affinity
             confidence = min(0.99, 0.35 + 0.30 * frequency + 0.25 * like_signal + 0.10 * recent)
             reasons: list[str] = []
+            discovery = row.get('source') == 'favorite_discovery' and not plays and not like_signal
+            if discovery:
+                reasons.extend((f"recommended from your favorite: {seeds_for(row)[0]['title']}", 'new song discovery'))
+                score = 0.45 + 0.10 * artist_affinity
             if plays >= 2:
                 reasons.append(f"listened {int(plays)} times")
             elif plays:
@@ -114,7 +123,7 @@ class RecommendationEngine:
                 score=score,
                 confidence=confidence,
                 reasons=tuple(reasons),
-                source="history",
+                source="favorite_discovery" if discovery else "history",
                 generated_at=utc_now_iso(),
             )
 
@@ -136,5 +145,9 @@ class RecommendationEngine:
         ordered = sorted(
             scored.values(),
             key=lambda item: (-round(float(item.score), 9), -round(float(item.confidence or 0), 9), item.track.artist.casefold(), item.track.title.casefold()),
-        )[:limit]
+        )
+        discoveries = [item for item in ordered if item.source == 'favorite_discovery'][:math.ceil(limit * .3)]
+        reserved = {item.track.track_key for item in discoveries}
+        anchors = [item for item in ordered if item.track.track_key not in reserved][:limit-len(discoveries)]
+        ordered = anchors[:3] + discoveries + anchors[3:]
         return [replace(item, rank=index) for index, item in enumerate(ordered, start=1)]

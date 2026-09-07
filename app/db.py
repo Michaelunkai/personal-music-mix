@@ -876,7 +876,18 @@ class Database:
                LIMIT ?""",
             (_limit(limit, maximum=50_000),),
         )
-        return [dict(row) for row in rows]
+        result = [dict(row) for row in rows]
+        cache = json.loads(self.get_metadata('favorite_discovery_cache') or '{}')
+        relationships: dict[str,list[dict]] = {}
+        moment = datetime.now(timezone.utc).timestamp()
+        for seed_key, entry in cache.items():
+            if entry.get('expires_at',0) <= moment:
+                continue
+            for track_key in entry.get('track_keys',[]):
+                relationships.setdefault(track_key,[]).append({'track_key':seed_key,'title':entry.get('title','a favorite'),'expires_at':entry.get('expires_at',0)})
+        for row in result:
+            row['discovery_seeds'] = relationships.get(row['track_key'],[])
+        return result
 
     def overview(self) -> dict[str, Any]:
         stats = self.list_track_stats(limit=50_000)

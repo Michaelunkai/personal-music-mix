@@ -137,7 +137,7 @@ function renderCollection() {
 
 async function scan() {
   const button = $("#scan-button"); button.disabled = true; button.textContent = "Refreshing…";
-  try { const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) }); if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed"); toast("Mix refreshed from your available history and favorites."); await refresh(); }
+  try { const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) }); if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed"); toast(result.discovery_pending ? "Mix refreshed. Fresh song suggestions requested; see connection status below." : "Mix refreshed from your available history and favorites."); await refresh(); }
   catch (error) { toast(error.message); } finally { button.disabled = false; button.textContent = "Refresh mix"; }
 }
 

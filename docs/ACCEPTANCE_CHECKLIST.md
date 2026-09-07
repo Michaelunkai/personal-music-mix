@@ -12,22 +12,24 @@ historical evidence, not current account connectivity or playback proof.
 | User acceptance criterion | Current evidence and state |
 |---|---|
 | Playlist based on THEIR YouTube favorites | **Unverified for the real account**: the saved library has no confirmed provider favorites. Dedicated partial Liked Music collection ingestion, zero-play favorites, and favorite-derived artist affinity pass automated tests. Actual collection still requires the approved browser connection. |
-| Easy refresh whenever requested | **API verified; live UI unverified**: refresh rebuilds a saved mix; regression tests cover concurrent polling, favorites changes, partial endpoint failures, and accurate item counts. Current refresh recalculates the saved library; it does not acquire new-to-library recommendations or promise a different mix. |
+| Easy refresh whenever requested | **API and discovery contract verified; live UI unverified**: refresh rebuilds a saved mix and queues public related-song discovery from current favorites. The local app pulls requests every 30 seconds. Up to six fresh suggestions receive space in a 20-song mix. Tests cover retries, expiry, removing a source favorite, delivery acknowledgment, polling and item counts. The provider may return the same suggestions. |
 | Listen to recommended songs within this website | **Unverified in a real browser**: embedded-player queue, next/previous, errors and autoplay instructions pass simulated API tests. No audible playback proof. YouTube may prohibit individual tracks; an external link is recovery only, not fulfillment of in-site playback. |
 | Professional deployed real URL | Owner-only production site exists at https://personal-music-mix.michaelovsky55555.chatgpt.site. D1 retains the hosted library/favorites. Saved-source and deployment receipts identify each release. |
 | Automatic correct signed-in account after restart | **Unverified**: approved runtime fails before browser discovery; no authenticated heartbeat. Local launcher and persistence are tested; Chrome/extension activation is a separate gate. |
 | Stored history and account preserved | SQLite backup before restart; semantic cloud-sync fingerprints, conservative history identity reconciliation and per-source favorites avoid duplicate plays and preference replacement. No profile, cookies or account credentials modified. |
 
-Latest regression suite: **25 Python tests and 14 JavaScript tests passed**.
+Latest regression suite: **31 Python tests and 16 JavaScript tests passed**.
 Tests include provider-ID enrichment/restart, partial liked collections without
 plays, current unlike precedence, timestamp conflict recovery, unchanged sync,
 favorite artist influence, refresh races and player queue behavior.
 The bridge route also verifies explicit YouTube unlike propagation, preserves
 unknown/conflicting control states, and leaves dashboard favorites independent.
 
-Exact browser blocker: `privileged native pipe bridge is not available;
-browser-client is not trusted` during `setupAtlasRuntime`, before
-`agent.browsers.list()`. The chief-of-staff task independently reproduced it.
+Current browser blocker after the documented kernel reset: `failed to write
+kernel assets: The system cannot find the path specified. (os error 3)`, even
+for plain JavaScript. Before reset, `setupAtlasRuntime` reported `privileged
+native pipe bridge is not available; browser-client is not trusted`, before
+`agent.browsers.list()`. The chief-of-staff task independently reproduced that error.
 A scoped host/runtime reconnection is required; a passing prior repair receipt
 does not grant current runtime authorization. No substitute browser route used.
 

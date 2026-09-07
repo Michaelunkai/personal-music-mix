@@ -80,7 +80,7 @@ def create_app(settings: Settings | None = None):
     def _startup() -> None:
         manager.start_scheduler()
         from .cloud_sync import start_cloud_sync
-        app.state.cloud_sync_stop = start_cloud_sync(database)
+        app.state.cloud_sync_stop = start_cloud_sync(database, on_library_changed=manager.rebuild_from_local_history)
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
