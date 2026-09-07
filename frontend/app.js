@@ -1,0 +1,273 @@
+const $ = (selector) => document.querySelector(selector);
+const state = { latestPlan: null, schedulerRunning: false, recommendations: [], ranked: [], library: [], view: 'mix', query: '', favorites: new Set(), queue: [], queueIndex: 0, player: null, playerReady: null, playerLoading: false, refreshing: false };
+
+function toast(message) {
+  const node = $("#toast");
+  node.textContent = message;
+  node.classList.add("show");
+  window.clearTimeout(toast.timer);
+  toast.timer = window.setTimeout(() => node.classList.remove("show"), 3800);
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, { signal: AbortSignal.timeout(20000), headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
+  const text = await response.text();
+  let data;
+  try { data = text ? JSON.parse(text) : {}; } catch { throw new Error("Your session may have expired. Reload the page to reconnect."); }
+  if (!response.ok) throw new Error(data.detail || data.message || `Request failed (${response.status})`);
+  return data;
+}
+
+function formatNumber(value) { return Number(value || 0).toLocaleString(); }
+
+function renderOverview(data) {
+  $("#track-count").textContent = formatNumber(data.track_count);
+  $("#play-count").textContent = formatNumber(data.play_count);
+  $("#liked-count").textContent = formatNumber(data.liked_track_count);
+  $("#taste-copy").textContent = data.liked_track_count
+    ? `Your mix uses ${formatNumber(data.provider_liked_track_count)} imported YouTube likes and ${formatNumber(data.local_favorite_count)} dashboard favorites, together with listening history. Favorite songs below to refine your mix.`
+    : "No confirmed favorites have been imported yet. This mix uses saved listening history. Favorite songs below to refine it; dashboard favorites stay local.";
+}
+
+function renderRecommendations(items) {
+  state.recommendations = items;
+  $("#play-mix").disabled = !items.some(item => videoId(item.track || {}));
+  const root = $("#recommendations");
+  $("#recommendation-count").textContent = `${items.length} songs`;
+  if (!items.length) { root.className = "recommendations empty"; root.textContent = state.query ? "No songs match this search. Try another title or artist." : state.view === 'favorites' ? "Your favorites will appear here. Save a song with the heart button to get started." : "Your music will appear after your first history sync."; return; }
+  root.className = "recommendations";
+  const rendered = items.map((item, index) => {
+    const track = item.track || {};
+    const reasons = (item.reasons || []).slice(0, 3).join(" • ");
+    const favorite = state.favorites.has(track.track_key);
+    return `<article class="recommendation"><div class="rank">${String(index + 1).padStart(2, "0")}</div><div class="track-detail"><div class="track-title">${escapeHtml(track.title || "Untitled")}</div><div class="track-meta">${escapeHtml(track.artist || "Unknown artist")}${track.album ? ` · ${escapeHtml(track.album)}` : ""}</div><div class="track-reasons">${escapeHtml(reasons)}</div><div class="track-actions"><button class="secondary" data-play="${index}" ${videoId(track) ? "" : "disabled"} aria-label="Play ${escapeHtml(track.title)}">▶ Play</button><button class="secondary" data-favorite="${escapeHtml(track.track_key)}" aria-label="${favorite ? 'Remove favorite' : 'Favorite'} ${escapeHtml(track.title)}" aria-pressed="${favorite}">${favorite ? "♥ Favorited" : "♡ Favorite"}</button></div></div><div class="score">${item.score == null ? '—' : Math.round(item.score * 100)}<span class="confidence">${item.score == null ? 'in your library' : 'match / 100'}</span></div></article>`;
+  }).join("");
+  if (root.innerHTML !== rendered) root.innerHTML = rendered;
+}
+
+function renderRuns(items) {
+  const root = $("#runs");
+  if (!items.length) { root.className = "runs empty"; root.textContent = "No scans yet."; return; }
+  root.className = "runs";
+  root.innerHTML = items.slice(0, 8).map((run) => `<div class="run ${run.status === "failed" ? "failed" : ""}"><strong>${escapeHtml(run.status)}</strong> · ${formatNumber(run.items_seen)} items<span>${escapeHtml(run.message || "No details")}${run.error_code ? ` · ${escapeHtml(run.error_code)}` : ""}</span></div>`).join("");
+}
+
+function renderLatestPlaylist(data) {
+  const root = $("#playlist-preview");
+  if (!data?.available || !data.plan) {
+    root.className = "preview empty";
+    root.textContent = "A preview appears automatically after the first successful history scan.";
+    state.latestPlan = null;
+    $("#write-button").disabled = true;
+    return;
+  }
+  const plan = data.plan;
+  const items = Array.isArray(plan.items) ? plan.items : [];
+  const recommendations = Array.isArray(plan.recommendations) ? plan.recommendations : [];
+  const tracks = recommendations.length ? recommendations : items;
+  state.latestPlan = plan;
+  root.className = "preview";
+  root.innerHTML = `<strong>Automatically generated: ${formatNumber(plan.requested_count || tracks.length)} songs.</strong><br>${escapeHtml(tracks.slice(0, 5).map((item) => {
+    const track = item.track || item;
+    return `${track.title || "Untitled"} — ${track.artist || "Unknown artist"}`;
+  }).join(" · "))}${tracks.length > 5 ? " · …" : ""}<br><span class="muted">Local preview only; no provider write was attempted.</span>`;
+  $("#write-button").disabled = !data.write_enabled;
+}
+
+function renderHealth(data) {
+  const pill = $("#health-pill");
+  const ok = Boolean(data.ok && data.database?.ok);
+  pill.classList.toggle("healthy", ok); pill.classList.toggle("error", !ok);
+  pill.querySelector("span:last-child").textContent = ok ? "Local app connected" : "Connection needs attention";
+}
+
+function renderConnection(data) {
+  const copy = $("#scan-copy");
+  if (!copy || !data) return;
+  const suffix = data.state === "history_ingested"
+    ? ` ${formatNumber(data.history_events)} listening events are stored locally.`
+    : "";
+  copy.textContent = `${data.message || "Connector status unavailable."}${suffix}`;
+}
+
+function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (char) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "'":"&#39;", '"':"&quot;" }[char])); }
+
+async function refresh({ silent = false } = {}) {
+  if (state.refreshing) return;
+  state.refreshing = true;
+  try {
+    const [health, overview, recs, runs, status, latestPlaylist, connection, favorites, library] = await Promise.all([api("/api/health"), api("/api/overview"), api("/api/recommendations"), api("/api/runs"), api("/api/status"), api("/api/playlists/latest"), api("/api/connection"), api("/api/favorites"), api("/api/library")]);
+    state.favorites = new Set(favorites.track_keys || []);
+    state.ranked = recs.items || []; state.library = library.items || [];
+    renderHealth(health); renderOverview(overview); renderCollection(); renderRuns(runs.items || []); renderLatestPlaylist(latestPlaylist); renderConnection(connection);
+    state.schedulerRunning = Boolean(status.scheduler_running);
+    const schedulerButton = $("#scheduler-button");
+    const bridgeDriven = status.scheduler_mode === "browser_bridge_event_driven";
+    schedulerButton.disabled = bridgeDriven;
+    schedulerButton.textContent = bridgeDriven ? "Automatic bridge sync" : (state.schedulerRunning ? "Pause auto-scan" : "Start auto-scan");
+    schedulerButton.dataset.action = state.schedulerRunning ? "stop" : "start";
+  } catch (error) { renderHealth({ ok: false }); if (!silent) toast(error.message); }
+  finally { state.refreshing = false; }
+}
+
+function renderCollection() {
+  let items = state.view === 'mix' ? state.ranked : state.library;
+  if (state.view === 'favorites') items = items.filter(item => state.favorites.has(item.track.track_key) || item.track.liked_count > 0 || item.track.like_events > 0);
+  const query = state.query.trim().toLocaleLowerCase();
+  if (query) items = items.filter(item => `${item.track.title} ${item.track.artist} ${item.track.album || ''}`.toLocaleLowerCase().includes(query));
+  renderRecommendations(items);
+}
+
+async function scan() {
+  const button = $("#scan-button"); button.disabled = true; button.textContent = "Refreshing…";
+  try { const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) }); if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed"); toast("Mix refreshed from your available history and favorites."); await refresh(); }
+  catch (error) { toast(error.message); } finally { button.disabled = false; button.textContent = "Refresh mix"; }
+}
+
+async function toggleScheduler() {
+  const button = $("#scheduler-button"); button.disabled = true;
+  try { await api("/api/scheduler", { method: "POST", body: JSON.stringify({ action: button.dataset.action }) }); await refresh(); }
+  catch (error) { toast(error.message); } finally { button.disabled = false; }
+}
+
+async function previewPlaylist() {
+  const root = $("#playlist-preview"); root.textContent = "Building preview…";
+  try {
+    const plan = await api("/api/playlists/preview", { method: "POST", body: JSON.stringify({ name: $("#playlist-name").value }) });
+    renderLatestPlaylist({ available: true, plan: plan.plan, write_enabled: plan.write_enabled });
+    toast("Preview ready; no provider write occurred.");
+  } catch (error) { root.className = "preview empty"; root.textContent = error.message; $("#write-button").disabled = true; }
+}
+
+async function writePlaylist() {
+  if (!state.latestPlan || !window.confirm("Create a private playlist in your YouTube Music account? This is an external write.")) return;
+  try { const result = await api("/api/playlists/write", { method: "POST", body: JSON.stringify({ name: $("#playlist-name").value, confirm: true }) }); toast(result.message || "Playlist write finished"); await refresh(); }
+  catch (error) { toast(error.message); }
+}
+
+function videoId(track) {
+  if (/^[A-Za-z0-9_-]{11}$/.test(track.video_id || "")) return track.video_id;
+  try {
+    const url = new URL(track.url || track.canonical_url);
+    if (!["music.youtube.com", "www.youtube.com", "youtube.com", "youtu.be"].includes(url.hostname)) return null;
+    const id = url.hostname === "youtu.be" ? url.pathname.slice(1) : url.searchParams.get("v") || (/^\/(podcast|song)\//.test(url.pathname) ? url.pathname.split("/")[2] : "");
+    return /^[A-Za-z0-9_-]{11}$/.test(id || "") ? id : null;
+  } catch { return null; }
+}
+
+function updatePlayingInfo() {
+  const track = state.queue[state.queueIndex];
+  if (!track) return;
+  $("#now-playing").textContent = `${track.title} — ${track.artist || "Unknown artist"}`;
+  const link = $("#open-playing");
+  link.href = `https://music.youtube.com/watch?v=${videoId(track)}`;
+  link.hidden = false;
+  $("#previous-track").disabled = state.queueIndex <= 0;
+  $("#next-track").disabled = state.queueIndex >= state.queue.length - 1;
+}
+
+function loadYouTubeAPI() {
+  if (window.YT?.Player) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    const fail = () => { window.clearTimeout(timer); script.remove(); reject(new Error("YouTube player could not load. Check your connection or open the song in YouTube Music.")); };
+    const timer = window.setTimeout(fail, 15000);
+    window.onYouTubeIframeAPIReady = () => { window.clearTimeout(timer); resolve(); };
+    script.src = "https://www.youtube.com/iframe_api";
+    script.onerror = fail;
+    document.head.appendChild(script);
+  });
+}
+
+async function ensurePlayer() {
+  if (state.playerReady) return state.playerReady;
+  await loadYouTubeAPI();
+  $("#player-frame").hidden = false;
+  state.playerReady = new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error("YouTube player did not become ready. Open this song in YouTube Music or try Play again.")), 15000);
+    state.player = new window.YT.Player("youtube-player", {
+      width: "100%", height: "360",
+      playerVars: { controls: 1, playsinline: 1, origin: window.location.origin },
+      events: {
+        onReady: () => { window.clearTimeout(timer); resolve(state.player); },
+        onStateChange: event => {
+          const index = state.player.getPlaylistIndex();
+          if (Number.isInteger(index) && index >= 0 && index < state.queue.length) { state.queueIndex = index; updatePlayingInfo(); }
+          const statuses = { 0: "Song ended.", 1: "Playing", 2: "Paused", 3: "Buffering…", 5: "Ready. Press play in the YouTube player." };
+          $("#player-status").textContent = statuses[event.data] || "Press play in the YouTube player to listen.";
+        },
+        onAutoplayBlocked: () => { $("#player-status").textContent = "Your browser paused autoplay. Press play inside the YouTube player."; },
+        onError: event => {
+          const restricted = [100, 101, 150].includes(event.data);
+          $("#player-status").textContent = restricted
+            ? "YouTube cannot play this song here. Choose Next or open it in YouTube Music."
+            : `YouTube playback failed (${event.data}). Try Next or open the song in YouTube Music.`;
+        },
+      },
+    });
+  }).catch(error => {
+    state.player?.destroy(); state.player = null; state.playerReady = null;
+    $("#player-frame").innerHTML = '<div id="youtube-player"></div>';
+    throw error;
+  });
+  return state.playerReady;
+}
+
+async function playTrack(index) {
+  if (state.playerLoading) return;
+  const selected = state.recommendations[index]?.track;
+  state.queue = state.recommendations.map(item => item.track).filter(track => videoId(track));
+  state.queueIndex = Math.max(0, state.queue.findIndex(track => track.track_key === selected?.track_key));
+  if (!state.queue.length) return toast("No playable YouTube song IDs are available in this mix.");
+  updatePlayingInfo();
+  state.playerLoading = true;
+  $("#player-status").textContent = "Loading YouTube player…";
+  try {
+    const player = await ensurePlayer();
+    player.loadPlaylist(state.queue.map(videoId), state.queueIndex);
+    $("#player-status").textContent = "Starting song… If playback pauses, press play inside the player.";
+  } catch (error) { $("#player-status").textContent = error.message; }
+  finally { state.playerLoading = false; }
+}
+
+function changeTrack(delta) {
+  if (!state.player || state.playerLoading) return;
+  const index = state.queueIndex + delta;
+  if (index < 0 || index >= state.queue.length) return;
+  state.queueIndex = index;
+  state.player.playVideoAt(index);
+  updatePlayingInfo();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  $("#song-search").addEventListener("input", event => { state.query = event.target.value; renderCollection(); });
+  document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => {
+    state.view = button.dataset.view;
+    document.querySelectorAll('[data-view]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
+    renderCollection();
+  }));
+  $("#play-mix").addEventListener("click", () => playTrack(0));
+  $("#previous-track").addEventListener("click", () => changeTrack(-1));
+  $("#next-track").addEventListener("click", () => changeTrack(1));
+  $("#recommendations").addEventListener("click", async event => {
+    const play = event.target.closest("[data-play]");
+    if (play) return playTrack(Number(play.dataset.play));
+    const favorite = event.target.closest("[data-favorite]");
+    if (!favorite) return;
+    favorite.disabled = true;
+    try {
+      const result = await api("/api/favorites", { method: "POST", body: JSON.stringify({ track_key: favorite.dataset.favorite, liked: !state.favorites.has(favorite.dataset.favorite) }) });
+      toast(result.mix_status === "completed" ? "Favorite saved. Mix updated." : "Favorite saved. Press Refresh mix when the current scan finishes.");
+      await refresh();
+    } catch (error) { toast(error.message); } finally { favorite.disabled = false; }
+  });
+  $("#scan-button").addEventListener("click", scan);
+  $("#scheduler-button").addEventListener("click", toggleScheduler);
+  $("#preview-button").addEventListener("click", previewPlaylist);
+  $("#write-button").addEventListener("click", writePlaylist);
+  refresh();
+  // Bridge sync is event-driven in the extension; polling keeps the visible
+  // dashboard current without requiring a user refresh or button click.
+  window.setInterval(() => refresh({ silent: true }), 5000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh({ silent: true }); });
+});

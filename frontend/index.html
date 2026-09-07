@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101b2d" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <meta name="description" content="Your private listening room. Discover your personal mix, save favorites, and listen with YouTube." />
+    <title>Personal Music Mix — Your listening room</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#recommendations">Skip to your songs</a>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">YOUR LISTENING ROOM</p>
+          <h1>Personal Music Mix<span class="title-dot">.</span></h1>
+          <p class="lede">Songs you return to. A mix that learns what you love.</p>
+        </div>
+        <div class="health-pill" id="health-pill"><span class="dot"></span><span>Checking connection…</span></div>
+      </header>
+
+      <section class="toolbar card" aria-label="Actions">
+        <div>
+          <h2>Made from your listening</h2>
+          <p id="scan-copy">The approved Chrome bridge syncs the authenticated YouTube Music history tab automatically; this dashboard refreshes when new history arrives.</p>
+        </div>
+        <div class="actions">
+          <button class="primary" id="scan-button">Refresh mix</button>
+          <button class="secondary" id="scheduler-button" data-action="start">Automatic bridge sync</button>
+        </div>
+      </section>
+
+
+
+      <div class="grid overview-grid">
+        <section class="metric card"><span class="metric-label">Tracks learned</span><strong id="track-count">—</strong><span class="metric-foot">unique songs in local database</span></section>
+        <section class="metric card"><span class="metric-label">Listening events</span><strong id="play-count">—</strong><span class="metric-foot">deduplicated history observations</span></section>
+        <section class="metric card"><span class="metric-label">Liked signals</span><strong id="liked-count">—</strong><span class="metric-foot">songs with a positive signal</span></section>
+      </div>
+
+      <div class="grid main-grid">
+        <section class="card recommendations-panel">
+          <div class="section-heading"><div><p class="eyebrow">FIND YOUR NEXT LISTEN</p><h2>Your music</h2></div><span class="badge" id="recommendation-count">0 songs</span></div>
+          <div class="library-controls">
+            <div class="view-buttons" role="group" aria-label="Music collection">
+              <button class="secondary" data-view="mix" aria-pressed="true">For you</button>
+              <button class="secondary" data-view="favorites" aria-pressed="false">Favorites</button>
+              <button class="secondary" data-view="library" aria-pressed="false">All songs</button>
+            </div>
+            <label class="search-label" for="song-search">Find a song or artist</label>
+            <input type="search" id="song-search" placeholder="Search your music…" autocomplete="off" />
+          </div>
+          <div id="recommendations" class="recommendations empty">Run a scan to build your first mix.</div>
+        </section>
+        <aside class="side-stack">
+      <section class="card player-card" aria-label="Music player" id="listening-room">
+        <div class="section-heading">
+          <div><p class="eyebrow">LISTEN HERE</p><h2 id="now-playing">Your personal mix</h2></div>
+          <button class="primary" id="play-mix" disabled>Play mix</button>
+        </div>
+        <p id="taste-copy" class="muted">Loading your favorites…</p>
+        <div id="player-frame" hidden><div id="youtube-player"></div></div>
+        <p id="player-status" role="status" aria-live="polite">Choose Play on a song, or play the whole mix.</p>
+        <div class="actions player-actions">
+          <button id="previous-track" class="secondary" disabled>Previous</button>
+          <button id="next-track" class="secondary" disabled>Next</button>
+          <a id="open-playing" target="_blank" rel="noopener noreferrer" hidden>Open song in YouTube Music ↗</a>
+        </div>
+        <small class="muted">Playback uses YouTube's player. Some songs may require opening YouTube Music because of availability or embedding restrictions.</small>
+      </section>
+          <section class="card playlist-card">
+            <p class="eyebrow">PLAYLIST BUILDER</p>
+            <h2>Your saved playlist</h2>
+            <label for="playlist-name">Playlist name</label>
+            <input id="playlist-name" value="Your personal mix" maxlength="120" />
+            <button class="secondary wide" id="preview-button">Preview playlist</button>
+            <div id="playlist-preview" class="preview empty">A local playlist preview is generated automatically after a successful history scan.</div>
+            <button class="danger wide" id="write-button" disabled>Write to YouTube Music</button>
+            <small class="muted">Provider writes are opt-in, separately confirmed, and disabled by default.</small>
+          </section>
+          <section class="card status-card">
+            <div class="section-heading"><div><p class="eyebrow">RUN LOG</p><h2>Recent activity</h2></div></div>
+            <div id="runs" class="runs empty">No scans yet.</div>
+          </section>
+        </aside>
+      </div>
+      <footer><span>Your listening history is personal. Playback is provided by YouTube.</span><a href="https://music.youtube.com/history" target="_blank" rel="noreferrer">Open YouTube Music history ↗</a></footer>
+    </main>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

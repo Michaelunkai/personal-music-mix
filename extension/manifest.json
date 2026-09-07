@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Music Personal Mix Bridge",
+  "version": "0.1.0",
+  "description": "Sends rendered YouTube Music history rows to the local personal mix app without reading cookies or passwords.",
+  "permissions": ["storage", "alarms", "tabs", "scripting"],
+  "host_permissions": ["https://music.youtube.com/*", "http://127.0.0.1:8000/*", "http://localhost:8000/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [{
+    "matches": ["https://music.youtube.com/*"],
+    "js": ["content.js"],
+    "run_at": "document_idle"
+  }],
+  "action": { "default_title": "Sync YouTube Music history" }
+}
