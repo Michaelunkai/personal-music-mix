@@ -82,6 +82,14 @@ test('hosted refresh queues discovery and only acknowledged delivery clears pend
   await call('/api/sync/import',{tracks:[seed,candidate]});
   await call('/api/favorites',{track_key:'seed',liked:true});
   assert.equal((await (await call('/api/recommendations')).json()).count,2);
+  const originalNow=Date.now;
+  try {
+    Date.now=()=>originalNow()+600000;
+    const expiredPreview=await (await call('/api/playlists/preview',{name:'After expiry'})).json();
+    assert.equal(expiredPreview.plan.items.length,1);
+    assert.equal(expiredPreview.plan.requested_count,1);
+    assert.equal(expiredPreview.plan.name,'After expiry');
+  } finally {Date.now=originalNow;}
   await call('/api/scan',{});
   const first=(await (await call('/api/favorites')).json()).discovery_request;
   assert.ok(first.id);

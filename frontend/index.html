@@ -35,9 +35,9 @@
 
 
       <div class="grid overview-grid">
-        <section class="metric card"><span class="metric-label">Tracks learned</span><strong id="track-count">—</strong><span class="metric-foot">unique songs in your library</span></section>
-        <section class="metric card"><span class="metric-label">Listening events</span><strong id="play-count">—</strong><span class="metric-foot">deduplicated history observations</span></section>
-        <section class="metric card"><span class="metric-label">Liked signals</span><strong id="liked-count">—</strong><span class="metric-foot">songs with a positive signal</span></section>
+        <section class="metric card"><span class="metric-label">Songs</span><strong id="track-count">—</strong><span class="metric-foot">in your music library</span></section>
+        <section class="metric card"><span class="metric-label">Recorded listens</span><strong id="play-count">—</strong><span class="metric-foot">from your available listening history</span></section>
+        <section class="metric card"><span class="metric-label">Favorites</span><strong id="liked-count">—</strong><span class="metric-foot">YouTube likes and songs you saved here</span></section>
       </div>
 
       <div class="grid main-grid">
@@ -75,10 +75,10 @@
             <h2>Your saved playlist</h2>
             <label for="playlist-name">Playlist name</label>
             <input id="playlist-name" value="Your personal mix" maxlength="120" />
-            <button class="secondary wide" id="preview-button">Preview playlist</button>
+            <button class="secondary wide" id="preview-button">Save playlist name</button>
             <div id="playlist-preview" class="preview empty">A local playlist preview is generated automatically after a successful history scan.</div>
-            <button class="danger wide" id="write-button" disabled>Write to YouTube Music</button>
-            <small class="muted">Provider writes are opt-in, separately confirmed, and disabled by default.</small>
+            <button class="danger wide" id="write-button" disabled hidden>Save to YouTube Music</button>
+            <small class="muted" id="playlist-write-help">Your playlist is saved here. Use Play mix to listen.</small>
           </section>
           <section class="card status-card">
             <div class="section-heading"><div><p class="eyebrow">RUN LOG</p><h2>Recent activity</h2></div></div>

@@ -95,6 +95,25 @@ test('playlist preview reports available songs rather than requested size', () =
   assert.match(h.node('#playlist-preview').innerHTML,/Your mix: 0 songs/);
 });
 
+test('saved playlist names reload without overwriting edits during polling or saving', async () => {
+  const h=harness();
+  h.context.plan={available:true,plan:{name:'Evening music',items:h.context.tracks}};
+  vm.runInContext('renderLatestPlaylist(plan)',h.context);
+  assert.equal(h.node('#playlist-name').value,'Evening music');
+  h.node('#playlist-name').value='New draft';
+  vm.runInContext('state.playlistNameDirty=true; renderLatestPlaylist(plan)',h.context);
+  assert.equal(h.node('#playlist-name').value,'New draft');
+  let release;
+  h.context.fetch=async()=>{await new Promise(resolve=>{release=resolve;});return {ok:true,text:async()=>JSON.stringify({plan:{name:'New draft',items:h.context.tracks},write_enabled:false})};};
+  const saving=vm.runInContext('previewPlaylist()',h.context);
+  assert.equal(h.node('#preview-button').disabled,true);
+  h.node('#playlist-name').value='Next draft';
+  release();await saving;
+  assert.equal(h.node('#playlist-name').value,'Next draft');
+  assert.equal(h.node('#preview-button').disabled,false);
+  assert.equal(h.node('#write-button').hidden,true);
+});
+
 test('Play builds the correct queue; polling does not stop or replace playback', async () => {
   const h = harness();
   assert.match(h.node('#recommendations').innerHTML, /data-play="1"/);

@@ -66,12 +66,15 @@ function renderLatestPlaylist(data) {
   const recommendations = Array.isArray(plan.recommendations) ? plan.recommendations : [];
   const tracks = recommendations.length ? recommendations : items;
   state.latestPlan = plan;
+  if (!state.playlistNameDirty) $("#playlist-name").value = plan.name || "Your personal mix";
   root.className = "preview";
   root.innerHTML = `<strong>Your mix: ${formatNumber(tracks.length)} songs.</strong><br>${escapeHtml(tracks.slice(0, 5).map((item) => {
     const track = item.track || item;
     return `${track.title || "Untitled"} — ${track.artist || "Unknown artist"}`;
   }).join(" · "))}${tracks.length > 5 ? " · …" : ""}<br><span class="muted">Play this mix here. Saving it to YouTube Music is a separate action.</span>`;
   $("#write-button").disabled = !data.write_enabled;
+  $("#write-button").hidden = !data.write_enabled;
+  $("#playlist-write-help").textContent = data.write_enabled ? "You can also save this playlist to your YouTube Music account." : "Your playlist is saved here. Use Play mix to listen.";
 }
 
 function renderHealth(data) {
@@ -117,6 +120,7 @@ async function refresh({ silent = false } = {}) {
         const schedulerButton = $("#scheduler-button");
         const bridgeDriven = status.scheduler_mode === "browser_bridge_event_driven";
         schedulerButton.disabled = bridgeDriven;
+        schedulerButton.hidden = bridgeDriven;
         schedulerButton.textContent = bridgeDriven ? "Automatic bridge sync" : (state.schedulerRunning ? "Pause auto-scan" : "Start auto-scan");
         schedulerButton.dataset.action = state.schedulerRunning ? "stop" : "start";
       }
@@ -149,11 +153,15 @@ async function toggleScheduler() {
 
 async function previewPlaylist() {
   const root = $("#playlist-preview"); root.textContent = "Building preview…";
+  const button = $("#preview-button"); button.disabled = true;
+  const requestedName = $("#playlist-name").value;
   try {
-    const plan = await api("/api/playlists/preview", { method: "POST", body: JSON.stringify({ name: $("#playlist-name").value }) });
+    const plan = await api("/api/playlists/preview", { method: "POST", body: JSON.stringify({ name: requestedName }) });
+    if ($("#playlist-name").value === requestedName) state.playlistNameDirty = false;
     renderLatestPlaylist({ available: true, plan: plan.plan, write_enabled: plan.write_enabled });
-    toast("Preview ready; no provider write occurred.");
+    toast("Playlist saved. Ready to play.");
   } catch (error) { root.className = "preview empty"; root.textContent = error.message; $("#write-button").disabled = true; }
+  finally { button.disabled = false; }
 }
 
 async function writePlaylist() {
@@ -257,6 +265,7 @@ function changeTrack(delta) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  $("#playlist-name").addEventListener("input", () => { state.playlistNameDirty = true; });
   $("#song-search").addEventListener("input", event => { state.query = event.target.value; renderCollection(); });
   document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => {
     state.view = button.dataset.view;

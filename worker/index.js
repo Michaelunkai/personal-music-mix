@@ -73,7 +73,9 @@ async function handleApi(request,env,path) {
   if(path === '/api/playlists/preview' && method === 'POST') {
     const payload = await body(); const plan = await readState(db,'playlist');
     if(!plan) return json({detail:'Refresh your mix first'},409);
-    const updated = {...plan,name:String(payload.name || plan.name).slice(0,120)};
+    const {rows,favorites}=await library(db);
+    const items=rankTracks(rows,favorites).map(item=>item.track);
+    const updated = {...plan,name:String(payload.name || plan.name).slice(0,120),items,requested_count:items.length};
     await saveState(db,'playlist',updated).run();
     return json({plan:updated,write_enabled:false});
   }
