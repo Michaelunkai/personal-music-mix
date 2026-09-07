@@ -43,11 +43,16 @@
 
   function readLiked(node) {
     if (node.getAttribute('data-liked') === 'true') return true;
+    if (node.getAttribute('data-liked') === 'false') return false;
     const controls = [...node.querySelectorAll('[aria-label], [title]')].filter(control => {
       const label = control.getAttribute('aria-label') || control.getAttribute('title') || '';
       return !/dislike|thumbs down/i.test(label) && /^(like|unlike|remove like|thumbs up)(\b|$)/i.test(label);
     });
-    return controls.length === 1 && (controls[0].getAttribute('aria-pressed') === 'true' || controls[0].getAttribute('aria-checked') === 'true' || /^(unlike|remove like)\b/i.test(controls[0].getAttribute('aria-label') || controls[0].getAttribute('title') || ''));
+    if (controls.length !== 1) return null;
+    const selected = controls[0].getAttribute('aria-pressed') ?? controls[0].getAttribute('aria-checked');
+    if (selected === 'true') return true;
+    if (selected === 'false') return false;
+    return /^(unlike|remove like)\b/i.test(controls[0].getAttribute('aria-label') || controls[0].getAttribute('title') || '') ? true : null;
   }
 
   function startMonitoring() {
@@ -88,10 +93,10 @@
       const titleNode = node.querySelector("[data-title], .title, .ytmusic-item-title, yt-formatted-string.title, [class*='title' i], [title]");
       const title = titleNode?.textContent?.trim() || titleNode?.getAttribute("title") || "";
       const url = node.querySelector('a[href*="watch"], a[href*="song/"], a[href*="podcast/"], a[href*="youtu.be/"]')?.href || (node.getAttribute("data-video-id") ? `https://music.youtube.com/watch?v=${encodeURIComponent(node.getAttribute("data-video-id"))}` : "");
-      const liked = onFavoritesPage() || readLiked(node);
-      return { title, artist: readArtist(node), album: readAlbum(node), url, liked, position, played_at: readPlayedAt(node), history_id: readHistoryId(node) };
+      const likeState = onFavoritesPage() ? true : readLiked(node);
+      return { title, artist: readArtist(node), album: readAlbum(node), url, liked:likeState === true, like_state_known:likeState !== null, position, played_at: readPlayedAt(node), history_id: readHistoryId(node) };
     }).filter((item) => item.title);
-    const fingerprint = JSON.stringify(items.map((item) => [item.title, item.artist, item.url, item.liked, item.played_at, item.history_id, item.position]));
+    const fingerprint = JSON.stringify(items.map((item) => [item.title, item.artist, item.url, item.liked, item.like_state_known, item.played_at, item.history_id, item.position]));
     if (!items.length) {
       window.setTimeout(schedule, 2500);
       return;

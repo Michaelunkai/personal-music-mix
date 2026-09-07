@@ -178,6 +178,7 @@ class BrowserBridgeIngestor:
                     video_id=video_id,
                     played_at=played_at,
                     liked=liked,
+                    metadata={'provider_like_state':liked} if favorites or (raw.get('like_state_known') is True and isinstance(raw.get('liked'),bool)) else {},
                     source=BrowserBridgeIngestor.name,
                     event_id=source_record_id,
                     source_record_id=source_record_id,

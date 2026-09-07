@@ -28,6 +28,9 @@ The bridge accepts visible rows from the exact history page and the YouTube Musi
 Liked Music collection (`/playlist?list=LM`). Favorites are stored without adding
 fake listening events. These snapshots are partial: missing rows never remove a
 favorite. Untimestamped history counts are conservative observed minimums.
+An explicitly observed unselected Like control clears that provider preference;
+missing or conflicting controls preserve the last known choice. Dashboard hearts
+remain separate from these provider preferences.
 Live activation of the revised bridge and real embedded playback remain awaiting
 the approved browser runtime; passing simulated-player tests is not audio proof.
 

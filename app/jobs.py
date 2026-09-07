@@ -198,8 +198,25 @@ class ScanManager:
                     self.database.set_like(track_id=track_id, liked=True, profile_id='default', source=BrowserBridgeIngestor.name)
             ingestion = {'received':len(result.items),'normalized':len(result.items),'inserted':0,'duplicates':0,'skipped':0,'favorites_observed':len(result.items)}
         else:
-            ingestion_result = self.history.ingest([item.to_dict() for item in result.items])
+            # Current controls are reconciled below, separately from listening
+            # events. Conflicting copies must not implicitly set a favorite.
+            records = [dict(item.to_dict(), liked=False) if isinstance(item.metadata.get('provider_like_state'),bool) else item.to_dict() for item in result.items]
+            ingestion_result = self.history.ingest(records)
             ingestion = {'received':ingestion_result.received,'normalized':ingestion_result.normalized,'inserted':ingestion_result.stored,'duplicates':ingestion_result.duplicates,'skipped':ingestion_result.skipped}
+            # A reliably observed unselected Like control supersedes an old
+            # positive observation. Unknown or conflicting controls cannot
+            # revoke a preference, and dashboard hearts remain independent.
+            observed_likes: dict[str, set[bool]] = {}
+            for item in result.items:
+                observed = item.metadata.get('provider_like_state')
+                if isinstance(observed, bool):
+                    observed_likes.setdefault(item.track_key, set()).add(observed)
+            for track_key, values in observed_likes.items():
+                if len(values) != 1:
+                    continue
+                row = self.database.query_one('SELECT track_id FROM canonical_tracks WHERE track_key=?', (track_key,))
+                if row:
+                    self.database.set_like(track_id=row['track_id'],liked=next(iter(values)),profile_id='default',source=BrowserBridgeIngestor.name)
         ingestion['overview'] = self.database.overview()
         related: list[TrackRecord] = []
         if include_related and self.settings.ytmusicapi_headers_path:

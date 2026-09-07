@@ -69,14 +69,15 @@ test('failed delivery retries identical rows and only acknowledged delivery dedu
 });
 
 test('only a selected positive like control or liked-collection membership marks favorites', () => {
-  for (const [options,expected] of [
-    [{label:'Like',pressed:'true'},true], [{label:'Like',pressed:'false'},false],
-    [{label:'Disliked',pressed:'true'},false], [{label:'Thumbs up'},false],
-    [{title:'I liked it'},false], [{label:'Shuffle',pressed:'true'},false],
-    [{favorites:true},true],
+  for (const [options,expected,known] of [
+    [{label:'Like',pressed:'true'},true,true], [{label:'Like',pressed:'false'},false,true],
+    [{label:'Disliked',pressed:'true'},false,false], [{label:'Thumbs up'},false,false],
+    [{title:'I liked it'},false,false], [{label:'Shuffle',pressed:'true'},false,false],
+    [{favorites:true},true,true],
   ]) {
     const h=contentHarness(options); vm.runInContext(source('content.js'),h.context);h.runTimer(900);
     assert.equal(h.messages[0].message.payload.items[0].liked,expected,JSON.stringify(options));
+    assert.equal(h.messages[0].message.payload.items[0].like_state_known,known,JSON.stringify(options));
     if(options.favorites) assert.equal(h.messages[0].message.payload.kind,'favorites');
   }
 });

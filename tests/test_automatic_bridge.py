@@ -131,6 +131,31 @@ def test_partial_liked_collection_creates_favorites_without_fabricating_plays(tm
         assert client.get('/api/overview').json()['provider_liked_track_count'] == 1
 
 
+def test_observed_provider_unlike_clears_only_provider_favorite(tmp_path):
+    from fastapi.testclient import TestClient
+    from app.api import create_app
+    with TestClient(create_app(_settings(tmp_path/'unlikes.sqlite3'))) as client:
+        row={'title':'Loved','artist':'Artist','url':'https://music.youtube.com/watch?v=aaaaaaaaaaa','liked':True,'like_state_known':True}
+        payload={'page':'https://music.youtube.com/history','items':[row]}
+        assert client.post('/api/browser/sync',json=payload).status_code == 200
+        assert client.get('/api/overview').json()['provider_liked_track_count'] == 1
+        client.post('/api/favorites',json={'track_key':'video:aaaaaaaaaaa','liked':True})
+        row.update(liked=False,like_state_known=False)
+        client.post('/api/browser/sync',json=payload)
+        assert client.get('/api/overview').json()['provider_liked_track_count'] == 1
+        row['like_state_known']=True
+        client.post('/api/browser/sync',json=payload)
+        overview=client.get('/api/overview').json()
+        assert overview['provider_liked_track_count'] == 0
+        assert overview['local_favorite_count'] == 1
+        assert overview['play_count'] == 1
+        client.post('/api/favorites',json={'track_key':'video:aaaaaaaaaaa','liked':False})
+        assert client.get('/api/overview').json()['liked_track_count'] == 0
+        payload['items']=[{**row,'liked':True},row]
+        client.post('/api/browser/sync',json=payload)
+        assert client.get('/api/overview').json()['provider_liked_track_count'] == 0, 'Conflicting visible controls cannot promote or revoke a preference'
+
+
 def test_recommendation_runs_remain_persistable_across_syncs(tmp_path: Path):
     pytest.importorskip("fastapi")
     pytest.importorskip("httpx")

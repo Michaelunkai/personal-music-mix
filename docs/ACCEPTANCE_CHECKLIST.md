@@ -18,10 +18,12 @@ historical evidence, not current account connectivity or playback proof.
 | Automatic correct signed-in account after restart | **Unverified**: approved runtime fails before browser discovery; no authenticated heartbeat. Local launcher and persistence are tested; Chrome/extension activation is a separate gate. |
 | Stored history and account preserved | SQLite backup before restart; semantic cloud-sync fingerprints, conservative history identity reconciliation and per-source favorites avoid duplicate plays and preference replacement. No profile, cookies or account credentials modified. |
 
-Latest regression suite: **24 Python tests and 14 JavaScript tests passed**.
+Latest regression suite: **25 Python tests and 14 JavaScript tests passed**.
 Tests include provider-ID enrichment/restart, partial liked collections without
 plays, current unlike precedence, timestamp conflict recovery, unchanged sync,
 favorite artist influence, refresh races and player queue behavior.
+The bridge route also verifies explicit YouTube unlike propagation, preserves
+unknown/conflicting control states, and leaves dashboard favorites independent.
 
 Exact browser blocker: `privileged native pipe bridge is not available;
 browser-client is not trusted` during `setupAtlasRuntime`, before
