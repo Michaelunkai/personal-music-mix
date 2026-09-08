@@ -32,6 +32,9 @@ async function currentFreshItems(db, rows, favorites, fallback = []) {
   const rowsByKey = new Map(rows.map(row => [row.track_key, row]));
   return (Array.isArray(fallback) ? fallback : []).filter(item => activeItem(item, rowsByKey, favorites));
 }
+const hasFavoriteSeed = item => (Array.isArray(item?.track?.discovery_seeds) ? item.track.discovery_seeds : [])
+  .some(seed => seed?.seed_kind === 'favorite' || seed?.liked === true);
+const hasFavoriteMix = items => (Array.isArray(items) ? items : []).some(hasFavoriteSeed);
 
 async function library(db) {
   const [tracks,favorites] = await Promise.all([
@@ -53,20 +56,26 @@ async function rebuild(db) {
   // discovery request. Only a genuinely new batch is added to the durable
   // served ledger.
   const previousRecommendations = await readState(db,'recommendations') || [];
-  const previousFresh = freshItems.length ? [] : await currentFreshItems(db,rows,favorites,previousRecommendations);
-  const visibleItems = freshItems.length ? freshItems : previousFresh;
-  const preservedPrevious = !freshItems.length && previousFresh.length > 0;
-  const nextServed = mergeKeys([...served], freshItems.map(item => trackKey(item)).filter(Boolean));
-  const run = {run_id:crypto.randomUUID(),status:'completed',items_seen:rows.length,finished_at:now(),message:freshItems.length
+  const previousFresh = await currentFreshItems(db,rows,favorites,previousRecommendations);
+  const preservedPrevious = previousFresh.length > 0 && (
+    !freshItems.length
+    || (hasFavoriteMix(previousFresh) && !hasFavoriteMix(freshItems))
+    || (previousFresh.length >= 20 && freshItems.length < previousFresh.length && !hasFavoriteMix(freshItems))
+  );
+  const visibleItems = preservedPrevious ? previousFresh : freshItems;
+  const nextServed = mergeKeys([...served], (preservedPrevious ? [] : freshItems).map(item => trackKey(item)).filter(Boolean));
+  const run = {run_id:crypto.randomUUID(),status:'completed',items_seen:rows.length,finished_at:now(),message:freshItems.length && !preservedPrevious
     ? `Fresh mix built from your most-listened songs and favorites; ${freshItems.length} songs are new to your listening history.`
     : preservedPrevious
-      ? `No new unseen songs arrived; your current ${previousFresh.length}-song mix stays available while the provider tries again.`
+      ? freshItems.length
+        ? `No complete favorite-aligned mix arrived; your current ${previousFresh.length}-song mix stays available while the provider tries again.`
+        : `No new unseen songs arrived; your current ${previousFresh.length}-song mix stays available while the provider tries again.`
       : 'No unseen playable recommendations are available yet. Refresh to request another provider discovery batch.'};
   const previous = await readState(db,'runs') || [];
   const oldPlan = await readState(db,'playlist');
-  const plan = {name:oldPlan?.name || 'Your personal mix',status:'preview',requested_count:visibleItems.length,items:visibleItems.map(row=>row.track || row),generated_at:freshItems.length ? now() : (oldPlan?.generated_at || now())};
+  const plan = {name:oldPlan?.name || 'Your personal mix',status:'preview',requested_count:visibleItems.length,items:visibleItems.map(row=>row.track || row),generated_at:freshItems.length && !preservedPrevious ? now() : (oldPlan?.generated_at || now())};
   await db.batch([saveState(db,'recommendations',visibleItems),saveState(db,'playlist',plan),saveState(db,'recommendation_history',nextServed),saveState(db,'runs',[run,...previous].slice(0,20))]);
-  return {status:'completed',run,recommendations:freshItems,playlist_preview:plan,preserved_previous_mix:preservedPrevious};
+  return {status:'completed',run,recommendations:preservedPrevious ? [] : freshItems,playlist_preview:plan,preserved_previous_mix:preservedPrevious};
 }
 
 async function handleApi(request,env,path) {

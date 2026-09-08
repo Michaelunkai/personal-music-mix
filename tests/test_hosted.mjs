@@ -205,6 +205,27 @@ test('refresh preserves the current fresh 20-song mix when no new candidates arr
   assert.deepEqual(new Set(latest.plan.items.map(item=>item.track_key)),firstKeys);
 });
 
+test('refresh preserves a full favorite mix when a smaller listening-only batch arrives', async () => {
+  const env={DB:database()};
+  const request=(path,body)=>worker.fetch(new Request(`https://favorite-preserve.chatgpt.site${path}`,{
+    ...(body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),
+    headers:{'Content-Type':'application/json','X-Mix-Mode':'fresh'},
+  }),env);
+  const expiry=Date.now()/1000+3600;
+  const favoriteSeed={track_key:'favorite-root',title:'Pinned Favorite',artist:'Favorite Artist',video_id:'fffffffffff',play_count:0,liked_count:1};
+  const favoriteItems=Array.from({length:20},(_,index)=>({track_key:`favorite-${index}`,title:`Favorite discovery ${index}`,artist:'Discovery Artist',video_id:String(index).padStart(11,'0'),play_count:0,liked_count:0,source:'favorite_discovery',discovery_seeds:[{track_key:favoriteSeed.track_key,title:favoriteSeed.title,seed_kind:'favorite',play_count:0,liked:true,expires_at:expiry}]}));
+  const first=await (await request('/api/sync/import',{tracks:[favoriteSeed,...favoriteItems]})).json();
+  assert.equal(first.recommendations.length,20);
+  const listeningSeed={track_key:'listening-root',title:'Most Played',artist:'Listening Artist',video_id:'ggggggggggg',play_count:50,liked_count:0};
+  const listeningItems=Array.from({length:9},(_,index)=>({track_key:`listening-${index}`,title:`Listening discovery ${index}`,artist:'Other Artist',video_id:String(index+30).padStart(11,'0'),play_count:0,liked_count:0,source:'favorite_discovery',discovery_seeds:[{track_key:listeningSeed.track_key,title:listeningSeed.title,seed_kind:'most_listened',play_count:50,liked:false,expires_at:expiry}]}));
+  const second=await (await request('/api/sync/import',{tracks:[listeningSeed,...listeningItems]})).json();
+  assert.equal(second.preserved_previous_mix,true);
+  assert.deepEqual(second.recommendations,[]);
+  assert.equal(second.playlist_preview.items.length,20);
+  assert.ok(second.playlist_preview.items.every(item=>item.track_key.startsWith('favorite-')));
+  assert.match(second.run.message,/favorite-aligned/);
+});
+
 test('hosted served ledger excludes songs already shown by the local publisher', async () => {
   const env={DB:database()};
   const request=(path,body)=>worker.fetch(new Request(`https://ledger.chatgpt.site${path}`,{
