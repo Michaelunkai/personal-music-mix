@@ -11,21 +11,31 @@ function harness() {
     return nodes.get(selector);
   };
   const loads = [], jumps = [], configs = [], posts = [];
+  const windowListeners = [];
+  const windowObject = {
+    location: { origin: 'http://127.0.0.1:8000' }, setTimeout: () => 1, clearTimeout() {},
+    addEventListener: (name, listener) => { if (name === 'message') windowListeners.push(listener); },
+    removeEventListener: (name, listener) => { if (name === 'message') { const index = windowListeners.indexOf(listener); if (index >= 0) windowListeners.splice(index, 1); } },
+    postMessage: (message, origin) => {
+      posts.push({ message, origin });
+      if (message.type === 'ytmusic-personal-mix-refresh') {
+        const result = { type: 'ytmusic-personal-mix-refresh-result', request_id: message.request_id, ok: true, tabs: 1, acknowledged: 1 };
+        windowListeners.slice().forEach(listener => listener({ source: windowObject, origin, data: result }));
+      }
+    },
+  };
   const tracks = ['aaaaaaaaaaa', 'bbbbbbbbbbb'].map((id, i) => ({ track: { track_key: `video:${id}`, video_id: id, title: `Song ${i}`, artist: 'Artist' }, score: 0.5 }));
+  windowObject.YT = { Player: class {
+    constructor(_id, config) { configs.push(config); Promise.resolve().then(() => config.events.onReady()); }
+    loadPlaylist(ids, index) { loads.push({ ids: Array.from(ids), index }); }
+    getPlaylistIndex() { return 1; }
+    playVideoAt(index) { jumps.push(index); }
+    destroy() {}
+  } };
   const context = vm.createContext({
     URL, console, AbortSignal,
     document: { querySelector: node, addEventListener() {} },
-    window: {
-      location: { origin: 'http://127.0.0.1:8000' }, setTimeout: () => 1, clearTimeout() {},
-      postMessage: (message, origin) => posts.push({ message, origin }),
-      YT: { Player: class {
-        constructor(_id, config) { configs.push(config); Promise.resolve().then(() => config.events.onReady()); }
-        loadPlaylist(ids, index) { loads.push({ ids: Array.from(ids), index }); }
-        getPlaylistIndex() { return 1; }
-        playVideoAt(index) { jumps.push(index); }
-        destroy() {}
-      } },
-    },
+    window: windowObject,
     fetch: async url => ({ ok: true, text: async () => JSON.stringify({
       '/api/health': { ok: true, database: { ok: true } },
       '/api/overview': { liked_track_count: 0 }, '/api/recommendations': { items: [] },
@@ -36,7 +46,7 @@ function harness() {
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../frontend/app.js'), 'utf8'), context);
   context.tracks = tracks;
   vm.runInContext('renderRecommendations(tracks)', context);
-  return { context, node, loads, jumps, configs, posts };
+  return { context, node, loads, jumps, configs, posts, windowListeners };
 }
 
 test('an activity error preserves successfully loaded music', async () => {

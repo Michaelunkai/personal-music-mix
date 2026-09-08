@@ -13,7 +13,33 @@
     // while keeping the bridge's account-reading code on YouTube Music only.
     window.addEventListener("message", (event) => {
       if (event.source !== window || event.origin !== location.origin || event.data?.type !== "ytmusic-personal-mix-refresh") return;
-      chrome.runtime.sendMessage({ type: "dashboard-refresh-request", requested_at: event.data.requested_at || new Date().toISOString() }).catch(() => {});
+      const requestId = typeof event.data.request_id === "string" ? event.data.request_id : "";
+      const message = {
+        type: "dashboard-refresh-request",
+        request_id: requestId,
+        requested_at: event.data.requested_at || new Date().toISOString(),
+      };
+      Promise.resolve(chrome.runtime.sendMessage(message))
+        .then((result) => {
+          window.postMessage({
+            type: "ytmusic-personal-mix-refresh-result",
+            request_id: requestId,
+            ok: Boolean(result?.ok),
+            tabs: Number(result?.tabs || 0),
+            acknowledged: Number(result?.acknowledged || 0),
+            error: result?.error || null,
+          }, location.origin);
+        })
+        .catch((error) => {
+          window.postMessage({
+            type: "ytmusic-personal-mix-refresh-result",
+            request_id: requestId,
+            ok: false,
+            tabs: 0,
+            acknowledged: 0,
+            error: String(error || "bridge_unavailable"),
+          }, location.origin);
+        });
     });
     return;
   }
@@ -24,6 +50,32 @@
   let pendingFingerprint = "";
   let monitoring = false;
   let forceSync = false;
+  let syncWaiters = [];
+  let syncWaiterTimer = null;
+
+  function settleSyncWaiters(result) {
+    if (!syncWaiters.length) return;
+    const waiters = syncWaiters;
+    syncWaiters = [];
+    if (syncWaiterTimer !== null) {
+      window.clearTimeout(syncWaiterTimer);
+      syncWaiterTimer = null;
+    }
+    for (const respond of waiters) {
+      try { respond(result); } catch (_) {}
+    }
+  }
+
+  function queueSyncWaiter(respond) {
+    if (typeof respond !== "function") return;
+    syncWaiters.push(respond);
+    if (syncWaiterTimer !== null) return;
+    syncWaiterTimer = window.setTimeout(() => {
+      syncWaiterTimer = null;
+      forceSync = false;
+      settleSyncWaiters({ ok: false, error: "No rendered YouTube Music rows became available." });
+    }, 10000);
+  }
 
   function text(node, selectors) {
     for (const selector of selectors) {
@@ -104,7 +156,10 @@
   }
 
   function collect() {
-    if (!onHistoryPage()) return;
+    if (!onHistoryPage()) {
+      settleSyncWaiters({ ok: false, error: "The YouTube Music history page is no longer open." });
+      return;
+    }
     const nodes = [...new Set(historyRows())];
     const items = nodes.map((node, position) => {
       const titleNode = node.querySelector("[data-title], .title, .ytmusic-item-title, yt-formatted-string.title, [class*='title' i], [title]");
@@ -130,11 +185,14 @@
           // Only an acknowledged local-app response can advance the snapshot.
           // An opaque no-CORS response cannot distinguish acceptance from 401/500.
           pendingFingerprint = "";
+          forceSync = true;
+          settleSyncWaiters({ ok: false, error: response?.error || chrome.runtime.lastError?.message || "Local app rejected the history sync." });
           window.setTimeout(schedule, 5000);
           return;
         }
         lastFingerprint = fingerprint;
         pendingFingerprint = "";
+        settleSyncWaiters({ ok: true, items: items.length });
       },
     );
   }
@@ -158,7 +216,13 @@
   }
 
   function schedule() { window.clearTimeout(timer); timer = window.setTimeout(collect, 900); }
-  chrome.runtime.onMessage.addListener((message) => { if (message?.type === "sync-now") { forceSync = true; schedule(); } });
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type !== "sync-now") return false;
+    queueSyncWaiter(sendResponse);
+    forceSync = true;
+    schedule();
+    return true;
+  });
   window.addEventListener("popstate", () => { if (onHistoryPage()) startMonitoring(); });
   window.addEventListener("yt-navigate-finish", () => { if (onHistoryPage()) startMonitoring(); });
   window.setInterval(() => {

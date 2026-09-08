@@ -94,7 +94,10 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000).
   The strongest play-count seeds drive discovery even before a song is explicitly
   liked; favorites refine the preference signal. With an active connector, new
   history arrives through that connector, while refreshing cached data does not
-  claim a new account sync.
+  claim a new account sync. When the bridge is installed, Refresh waits for its
+  acknowledgement that the visible history or Liked Music rows were accepted
+  before rebuilding the hosted mix; an unavailable bridge falls back to the
+  saved snapshot after a short timeout.
 - If the provider has not returned a new playable candidate yet, the For you tab
   stays empty and the connection panel reports whether the request is pending,
   temporarily unavailable, or exhausted. The Favorites and All songs tabs still

@@ -131,12 +131,30 @@ async function refresh({ silent = false } = {}) {
   return state.refreshing;
 }
 
-function requestBridgeRefresh() {
+function requestBridgeRefresh({ timeoutMs = 4000 } = {}) {
   // The installed bridge can hear this same-origin message on the dashboard
   // and immediately ask the YouTube Music history/liked-music tabs to resend
-  // their rendered rows. The hosted API remains the source of truth; this is
-  // only a low-friction signal for the local authenticated companion.
-  window.postMessage({ type: "ytmusic-personal-mix-refresh", requested_at: new Date().toISOString() }, window.location.origin);
+  // their rendered rows. Wait for its small acknowledgement so a hosted scan
+  // does not rebuild from the previous snapshot when the bridge is online.
+  // The bounded timeout keeps cached mode responsive when no bridge is loaded.
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      window.removeEventListener?.("message", onMessage);
+      resolve(result || { ok: false, timed_out: true });
+    };
+    const onMessage = (event) => {
+      if (event.source !== window || event.origin !== window.location.origin || event.data?.type !== "ytmusic-personal-mix-refresh-result" || event.data?.request_id !== requestId) return;
+      finish(event.data);
+    };
+    const timer = window.setTimeout(() => finish({ ok: false, timed_out: true }), timeoutMs);
+    window.addEventListener?.("message", onMessage);
+    window.postMessage({ type: "ytmusic-personal-mix-refresh", request_id: requestId, requested_at: new Date().toISOString() }, window.location.origin);
+  });
 }
 
 function renderCollection() {
@@ -149,7 +167,7 @@ function renderCollection() {
 
 async function scan() {
   const button = $("#scan-button"); button.disabled = true; button.textContent = "Refreshing…";
-  try { requestBridgeRefresh(); const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) }); if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed"); toast(result.recommendations?.length ? "Fresh mix ready with new songs." : "Fresh request sent. New songs will appear when the provider discovery batch arrives."); await refresh(); }
+  try { await requestBridgeRefresh(); const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) }); if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed"); toast(result.recommendations?.length ? "Fresh mix ready with new songs." : "Fresh request sent. New songs will appear when the provider discovery batch arrives."); await refresh(); }
   catch (error) { toast(error.message); } finally { button.disabled = false; button.textContent = "Refresh mix"; }
 }
 

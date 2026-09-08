@@ -4,4 +4,4 @@ This optional Manifest V3 extension is the most direct way to scan the account a
 
 If `YTMUSIC_BROWSER_BRIDGE_TOKEN` is configured, set the same value in the extension's service-worker storage from DevTools before syncing. With no token configured the bridge remains local-only and accepts requests from localhost.
 
-Each accepted sync updates the local recommendation model and automatically saves a dry-run playlist preview. Provider-side playlist creation remains a separate, explicitly confirmed action in the dashboard.
+Each accepted sync updates the local recommendation model and automatically saves a dry-run playlist preview. A dashboard Refresh waits for this local acknowledgement before its hosted rebuild, so an online bridge cannot race the previous snapshot. Provider-side playlist creation remains a separate, explicitly confirmed action in the dashboard.

@@ -68,6 +68,17 @@ test('failed delivery retries identical rows and only acknowledged delivery dedu
   assert.equal(h.messages.length, 3, 'Explicit sync resends acknowledged rows for recovery');
 });
 
+test('sync-now acknowledges only after the local app accepts the rendered rows', () => {
+  const h = contentHarness();
+  vm.runInContext(source('content.js'), h.context);
+  let response;
+  h.listeners[0]({ type: 'sync-now' }, {}, value => { response = value; });
+  h.runTimer(900);
+  assert.equal(response, undefined);
+  h.messages[0].callback({ ok: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(response)), { ok: true, items: 1 });
+});
+
 test('only a selected positive like control or liked-collection membership marks favorites', () => {
   for (const [options,expected,known] of [
     [{label:'Like',pressed:'true'},true,true], [{label:'Like',pressed:'false'},false,true],
@@ -116,22 +127,30 @@ test('background request failure returns a retryable error and uses a deadline',
 test('dashboard refresh signal is same-origin and reaches the service worker', async () => {
   const listeners = [];
   const messages = [];
-  const windowObject = { addEventListener: (name, fn) => { if (name === 'message') listeners.push(fn); } };
+  const posted = [];
+  const windowObject = {
+    addEventListener: (name, fn) => { if (name === 'message') listeners.push(fn); },
+    postMessage: (message, origin) => posted.push({ message, origin }),
+  };
   const context = vm.createContext({
     URL,
     location: { origin: 'https://personal-music-mix.michaelovsky55555.chatgpt.site' },
     window: windowObject,
-    chrome: { runtime: { sendMessage: message => { messages.push(message); return Promise.resolve(); } } },
+    chrome: { runtime: { sendMessage: message => { messages.push(message); return Promise.resolve({ ok: true, tabs: 2, acknowledged: 2 }); } } },
   });
   vm.runInContext(source('content.js'), context);
   assert.equal(listeners.length, 1);
   listeners[0]({
     source: windowObject,
     origin: 'https://personal-music-mix.michaelovsky55555.chatgpt.site',
-    data: { type: 'ytmusic-personal-mix-refresh', requested_at: '2026-09-08T00:00:00.000Z' },
+    data: { type: 'ytmusic-personal-mix-refresh', request_id: 'refresh-1', requested_at: '2026-09-08T00:00:00.000Z' },
   });
-  await Promise.resolve();
-  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{ type: 'dashboard-refresh-request', requested_at: '2026-09-08T00:00:00.000Z' }]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{ type: 'dashboard-refresh-request', request_id: 'refresh-1', requested_at: '2026-09-08T00:00:00.000Z' }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(posted)), [{
+    message: { type: 'ytmusic-personal-mix-refresh-result', request_id: 'refresh-1', ok: true, tabs: 2, acknowledged: 2, error: null },
+    origin: 'https://personal-music-mix.michaelovsky55555.chatgpt.site',
+  }]);
   listeners[0]({ source: windowObject, origin: 'https://evil.example', data: { type: 'ytmusic-personal-mix-refresh' } });
   await Promise.resolve();
   assert.equal(messages.length, 1);
@@ -163,11 +182,11 @@ test('background accepts dashboard refresh only from approved origins', async ()
   });
   vm.runInContext(source('background.js'), context);
   const accepted = await new Promise(resolve => listeners.message(
-    { type: 'dashboard-refresh-request' },
+    { type: 'dashboard-refresh-request', request_id: 'refresh-2' },
     { url: 'https://personal-music-mix.michaelovsky55555.chatgpt.site/' },
     resolve,
   ));
-  assert.deepEqual(JSON.parse(JSON.stringify(accepted)), { ok: true, tabs: 2 });
+  assert.deepEqual(JSON.parse(JSON.stringify(accepted)), { ok: true, tabs: 2, acknowledged: 2, request_id: 'refresh-2' });
   assert.deepEqual(JSON.parse(JSON.stringify(sent)), [
     { id: 10, message: { type: 'sync-now' } },
     { id: 11, message: { type: 'sync-now' } },

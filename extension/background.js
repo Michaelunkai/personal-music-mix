@@ -17,17 +17,25 @@ function isHistoryUrl(url) {
 }
 
 async function requestHistorySync(tabId) {
-  if (!tabId) return;
+  if (!tabId) return { ok: false, error: "History tab has no id" };
+  const send = async () => {
+    const response = await chrome.tabs.sendMessage(tabId, { type: "sync-now" });
+    // Older unpacked bridge versions did not acknowledge sync-now. Treat a
+    // delivered message as queued so a dashboard refresh remains compatible
+    // while the current bridge waits for local-app ingestion.
+    return response === undefined ? { ok: true, queued: true } : response;
+  };
   try {
-    await chrome.tabs.sendMessage(tabId, { type: "sync-now" });
+    return await send();
   } catch (_) {
     // Restored tabs can predate the unpacked bridge content script. Inject it
     // only into the exact history page, then retry without user interaction.
     try {
       await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
-      await chrome.tabs.sendMessage(tabId, { type: "sync-now" });
+      return await send();
     } catch (_) {
       // The next alarm/tab update retries.
+      return { ok: false, error: "History tab bridge is unavailable" };
     }
   }
 }
@@ -35,8 +43,11 @@ async function requestHistorySync(tabId) {
 async function requestHistoryTabsSync() {
   const tabs = await chrome.tabs.query({ url: [HISTORY_URL_PATTERN, 'https://music.youtube.com/playlist*'] });
   const targets = tabs.filter((tab) => isHistoryUrl(tab.url));
-  await Promise.all(targets.map((tab) => requestHistorySync(tab.id)));
-  return targets.length;
+  const results = await Promise.all(targets.map((tab) => requestHistorySync(tab.id)));
+  return {
+    count: targets.length,
+    acknowledged: results.filter((result) => result?.ok).length,
+  };
 }
 
 function isDashboardUrl(url) {
@@ -96,7 +107,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
     }
     requestHistoryTabsSync()
-      .then((tabs) => sendResponse({ ok: true, tabs }))
+      .then((result) => sendResponse({ ok: true, tabs: result.count, acknowledged: result.acknowledged, request_id: message.request_id || "" }))
       .catch((error) => sendResponse({ ok: false, error: String(error) }));
     return true;
   }
