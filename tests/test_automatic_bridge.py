@@ -359,3 +359,31 @@ def test_cloud_served_ledger_change_rebuilds_local_fresh_cache(tmp_path: Path, m
     finally:
         stop.set()
         wake.set()
+
+
+def test_cloud_sync_initial_pass_rebuilds_existing_local_cache(tmp_path: Path, monkeypatch):
+    import app.cloud_sync as cloud_sync
+
+    config = tmp_path / "cloud-sync.json"
+    config.write_text("{}", encoding="utf-8")
+    rebuilds = []
+
+    def fake_publish(database, config_path=None, *, discovery=None):
+        return {"state": "unchanged", "served_keys_merged": 0}
+
+    monkeypatch.setattr(cloud_sync, "publish_library", fake_publish)
+    wake = threading.Event()
+    stop = cloud_sync.start_cloud_sync(
+        object(),
+        on_library_changed=lambda: rebuilds.append(time.monotonic()),
+        config_path=config,
+        wake_event=wake,
+    )
+    try:
+        deadline = time.monotonic() + 2
+        while not rebuilds and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert rebuilds, "The first cloud sync pass did not refresh an existing local cache"
+    finally:
+        stop.set()
+        wake.set()

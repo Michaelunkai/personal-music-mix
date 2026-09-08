@@ -30,6 +30,24 @@ def _unprotect(encoded: str) -> str:
         ctypes.windll.kernel32.LocalFree(outgoing.data)
 
 
+def _recommendation_keys(payload: object) -> list[str]:
+    """Extract hosted fresh-song keys from a successful import response."""
+
+    if not isinstance(payload, dict):
+        return []
+    result: list[str] = []
+    for item in payload.get("recommendations", ()):
+        if not isinstance(item, dict):
+            continue
+        track = item.get("track", item)
+        if not isinstance(track, dict):
+            continue
+        key = track.get("track_key")
+        if isinstance(key, str) and key.strip():
+            result.append(key.strip())
+    return list(dict.fromkeys(result))
+
+
 def publish_library(database, config_path: Path | None = None, *, discovery=None) -> dict:
     config_path = config_path or Path(__file__).resolve().parent.parent / "data" / "cloud-sync.json"
     if not config_path.is_file():
@@ -92,8 +110,10 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
         # worker rebuilds the fresh mix once, after the complete candidate set
         # is present.  The bound still protects the request body on unusually
         # large histories.
+        hosted_recommendation_keys: list[str] = []
         for offset in range(0, len(tracks), 500):
             chunk = tracks[offset:offset+500]
+            defer_rebuild = offset + len(chunk) < len(tracks)
             body = json.dumps({
                 "tracks": chunk,
                 "last_sync_at": database.get_metadata("browser_bridge_last_sync"),
@@ -101,13 +121,20 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
                 # rebuild per chunk can make the last response replace a
                 # healthy fresh mix with an empty one when its chunk has no
                 # active seed rows.
-                "defer_rebuild": offset + len(chunk) < len(tracks),
+                "defer_rebuild": defer_rebuild,
             }).encode("utf-8")
             request = Request(origin.rstrip("/") + "/api/sync/import", data=body, headers={"Content-Type": "application/json", "OAI-Sites-Authorization": "Bearer " + token}, method="POST")
             with urlopen(request, timeout=20) as response:
                 result = json.load(response)
             if result.get("status") != "completed":
                 raise RuntimeError("Private site did not confirm the library update")
+            if not defer_rebuild:
+                hosted_recommendation_keys = _recommendation_keys(result)
+        if hosted_recommendation_keys:
+            # The hosted rebuild may have consumed a fresh batch while this
+            # publisher was uploading the library. Pull those keys into the
+            # local exclusion set before the local callback re-ranks.
+            cloud_served_merged += database.merge_cloud_served_keys(hosted_recommendation_keys)
         result = {
             "state": "synced",
             "tracks": len(tracks),
@@ -142,14 +169,17 @@ def start_cloud_sync(database, on_library_changed=None, *, config_path: Path | N
     discovery = FavoriteDiscovery(database)
 
     def run():
+        first_pass = True
         while not stop.is_set():
             result = publish_library(database, config, discovery=discovery)
             ledger_changed = int(result.get('served_keys_merged') or 0) > 0
-            if (result.get('state') == 'synced' or ledger_changed) and on_library_changed:
+            initial_cache_refresh = first_pass and result.get('state') in {'synced', 'unchanged'}
+            if (result.get('state') == 'synced' or ledger_changed or initial_cache_refresh) and on_library_changed:
                 try:
                     on_library_changed()
                 except Exception as exc:
                     database.set_metadata('cloud_local_rebuild_error',type(exc).__name__)
+            first_pass = False
             wake.wait(30)
             wake.clear()
             if stop.is_set():

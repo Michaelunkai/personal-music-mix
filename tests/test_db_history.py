@@ -66,13 +66,13 @@ def test_cloud_sync_pulls_newer_favorites_even_without_local_changes(tmp_path, m
     def urlopen(request, timeout):
         if request.get_method() == 'POST':
             imported.append(json.loads(request.data))
-            return io.StringIO('{"status":"completed"}')
+            return io.StringIO(json.dumps({'status':'completed','recommendations':[{'track':{'track_key':'video:ccccccccccc'}}]}))
         return io.StringIO(json.dumps({'records':records,'served_keys':served}))
     monkeypatch.setattr(cloud_sync,'urlopen',urlopen)
     first = cloud_sync.publish_library(db,config)
     assert first['state'] == 'synced'
-    assert first['served_keys_merged'] == 1
-    assert 'video:bbbbbbbbbbb' in db.recommendation_exclusion_keys()
+    assert first['served_keys_merged'] == 2
+    assert {'video:bbbbbbbbbbb','video:ccccccccccc'}.issubset(db.recommendation_exclusion_keys())
     second = cloud_sync.publish_library(db,config)
     assert second['state'] == 'unchanged'
     assert second['served_keys_merged'] == 0
