@@ -884,10 +884,33 @@ class Database:
             if entry.get('expires_at',0) <= moment:
                 continue
             for track_key in entry.get('track_keys',[]):
-                relationships.setdefault(track_key,[]).append({'track_key':seed_key,'title':entry.get('title','a favorite'),'expires_at':entry.get('expires_at',0)})
+                relationships.setdefault(track_key,[]).append({
+                    'track_key':seed_key,
+                    'title':entry.get('title','a song you enjoy'),
+                    'expires_at':entry.get('expires_at',0),
+                    'seed_kind':entry.get('seed_kind','favorite'),
+                    'play_count':entry.get('play_count',0),
+                    'liked':bool(entry.get('liked', entry.get('seed_kind') == 'favorite')),
+                })
         for row in result:
             row['discovery_seeds'] = relationships.get(row['track_key'],[])
         return result
+
+    def recommendation_exclusion_keys(self) -> set[str]:
+        """Return songs already shown by a completed recommendation run.
+
+        Recommendation runs are append-only evidence of what the user was
+        served. Keeping this query in SQLite makes the no-repeat rule survive
+        restarts and does not depend on an in-memory worker cache.
+        """
+
+        rows = self.query_all(
+            """SELECT DISTINCT i.track_key
+               FROM recommendation_items i
+               JOIN recommendation_runs r ON r.run_id = i.run_id
+               WHERE r.status = 'completed' AND i.track_key IS NOT NULL"""
+        )
+        return {str(row['track_key']) for row in rows if row['track_key']}
 
     def overview(self) -> dict[str, Any]:
         stats = self.list_track_stats(limit=50_000)

@@ -117,10 +117,18 @@ def create_app(settings: Settings | None = None):
     def overview() -> dict[str, Any]:
         return database.overview()
 
+    def _fresh_requested(request: Request) -> bool:
+        """The dashboard marks reads that must obey the unseen-only contract."""
+        return request.headers.get("X-Mix-Mode") == "fresh" or request.query_params.get("unheard_only") == "1"
+
     @app.get("/api/recommendations")
-    def recommendations(limit: int = 30) -> dict[str, Any]:
+    def recommendations(request: Request, limit: int = 30) -> dict[str, Any]:
         limit = max(1, min(limit, 200))
-        items = database.latest_recommendations(limit=limit)
+        items = database.latest_recommendations(limit=limit) if _fresh_requested(request) else [
+            item.to_dict() for item in manager.engine.recommend(
+                database.list_track_stats(limit=10000), limit=limit
+            )
+        ]
         return {"items": items, "count": len(items)}
 
     @app.get("/api/library")
@@ -192,8 +200,14 @@ def create_app(settings: Settings | None = None):
         return manager.run_now(limit=payload.get("max_records"), include_related=bool(payload.get("include_related", True)))
 
     @app.get("/api/playlists/latest")
-    def latest_playlist() -> dict[str, Any]:
+    def latest_playlist(request: Request) -> dict[str, Any]:
         plan = database.latest_playlist_preview()
+        if plan and not _fresh_requested(request):
+            legacy = manager.engine.recommend(database.list_track_stats(limit=10000), limit=settings.recommendation_limit)
+            plan = {**plan, "items": [item.track.to_dict() for item in legacy], "requested_count": len(legacy)}
+        elif plan:
+            fresh = database.latest_recommendations(limit=settings.recommendation_limit)
+            plan = {**plan, "recommendations": fresh, "items": [item.get("track") for item in fresh], "requested_count": len(fresh)}
         return {"available": plan is not None, "plan": plan, "write_enabled": settings.allow_playlist_writes}
 
     @app.post("/api/scan")

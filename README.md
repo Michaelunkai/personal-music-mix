@@ -20,15 +20,19 @@ fixture data. A failed upload is retried without claiming a successful cloud syn
 
 Favorites now synchronize in both directions. New explicit choices advance past
 the stored preference timestamp, so clock differences and older retries cannot
-undo a website change. Favorite artists also influence other songs by that artist.
-Refresh immediately recalculates the mix and queues a public related-song request
-from current favorites. The local app checks that request every 30 seconds, queries
-up to three favorites with eight candidates each, and publishes the result. Six
-places in a 20-song mix are reserved for available new discoveries. Suggestions
-expire after six hours; failed requests retry after five minutes. No account
-credentials are needed for public discovery, and no plays or favorites are invented.
-The site reports when the local app is offline or a request is pending. A provider
-may return the same songs on another request; a different selection is not guaranteed.
+undo a website change. The discovery seeds are the songs with the strongest
+observed play counts, with imported and dashboard favorites added as preference
+signals. Refresh queues a bounded public related-song request from those seeds.
+The local app checks that request every 30 seconds, queries up to three rotating
+seeds with up to 25 candidates each, and publishes the result. The hosted site
+keeps a durable served-song ledger and its For you mix contains only playable
+songs with zero observed plays and no like signal; history rows are never shown
+as recommendations. A completed refresh consumes its songs, so the next refresh
+cannot repeat them. Suggestions expire after six hours; failed requests retry
+after five minutes. No account credentials are needed for public discovery, and
+no plays or favorites are invented. If the provider has no unseen candidates,
+the mix is empty and the connection panel explains that another refresh can
+request a new batch.
 
 The bridge accepts visible rows from the exact history page and the YouTube Music
 Liked Music collection (`/playlist?list=LM`). Favorites are stored without adding
@@ -78,11 +82,16 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000).
   current playback queue.
 - **Favorite** saves a local preference and rebuilds the mix immediately. These
   favorites survive app restarts and remain separate from imported YouTube likes.
-- **Refresh mix** recalculates the ranking and saved playlist from available
-  history and favorites. With an active connector, new history arrives through
-  that connector; refreshing cached data does not claim a new account sync.
-- The page reports when no confirmed favorites have been imported. In that case
-  the existing ranking uses history, and you can add dashboard favorites.
+- **Refresh mix** consumes the current fresh mix, requests another provider
+  discovery batch, and shows only songs that are new to your listening history.
+  The strongest play-count seeds drive discovery even before a song is explicitly
+  liked; favorites refine the preference signal. With an active connector, new
+  history arrives through that connector, while refreshing cached data does not
+  claim a new account sync.
+- If the provider has not returned a new playable candidate yet, the For you tab
+  stays empty and the connection panel reports whether the request is pending,
+  temporarily unavailable, or exhausted. The Favorites and All songs tabs still
+  expose the saved library.
 - YouTube may block embedding, age-restrict, remove, or region-restrict a song.
   Playback errors offer **Next** and **Open song in YouTube Music**. Browser
   autoplay restrictions may require clicking Play inside the embedded player.
@@ -115,6 +124,11 @@ If you deliberately export a compatible `ytmusicapi` headers JSON file, set `YTM
 - `POST /api/browser/sync` for the local extension bridge
 - `POST /api/scheduler` with `{ "action": "start" | "stop" }`
 - `POST /api/playlists/preview` and `POST /api/playlists/write` (the latter requires `{ "confirm": true }` plus the environment opt-in)
+
+The dashboard sends `X-Mix-Mode: fresh` on recommendation and playlist reads so
+the visible site uses the unseen-only contract. The hosted worker persists the
+served-song ledger in D1; the local SQLite bridge persists the equivalent set in
+completed recommendation runs.
 
 ## Verification
 

@@ -1,7 +1,6 @@
-"""Bounded public song discovery from current favorites; never account access."""
+"""Bounded public song discovery from listening signals; never account access."""
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import time
@@ -31,12 +30,27 @@ class FavoriteDiscovery:
     def refresh(self, request_id: str | None = None) -> dict:
         moment = self.clock()
         cache = json.loads(self.database.get_metadata('favorite_discovery_cache') or '{}')
-        seeds = [row for row in self.database.list_track_stats(limit=10000)
-                 if row.get('liked_count', 0) > 0 and re.fullmatch(r'[\w-]{11}', row.get('video_id') or '')]
-        seeds.sort(key=lambda row: (-row['play_count'], row['track_key']))
+        stats = self.database.list_track_stats(limit=10000)
+        def is_liked(row):
+            return bool(row.get('local_favorite') or row.get('liked') is True
+                        or row.get('liked_count', 0) > 0 or row.get('like_events', 0) > 0)
+        # Most-listened songs are the primary real-time taste signal. Explicit
+        # favorites with no plays are retained as equally valid zero-play seeds.
+        seeds = [row for row in stats
+                 if (row.get('play_count', 0) > 0 or is_liked(row))
+                 and re.fullmatch(r'[\w-]{11}', row.get('video_id') or '')]
+        seeds.sort(key=lambda row: (-int(row.get('play_count') or 0), -int(is_liked(row)), row['track_key']))
         new_request = bool(request_id and request_id != self.database.get_metadata('favorite_discovery_request'))
         if new_request and seeds:
-            offset = int(hashlib.sha256(request_id.encode()).hexdigest()[:8],16) % len(seeds)
+            # Rotate the leading seed window on each acknowledged refresh. A
+            # request ID is still used as the durable acknowledgement key, but
+            # the sequence avoids repeatedly selecting the same top three rows.
+            try:
+                sequence = int(self.database.get_metadata('favorite_discovery_sequence') or 0) + 1
+            except (TypeError, ValueError):
+                sequence = 1
+            self.database.set_metadata('favorite_discovery_sequence', str(sequence))
+            offset = (sequence * 3) % len(seeds)
             seeds = seeds[offset:] + seeds[:offset]
         selected = seeds[:3]
         failures = 0
@@ -50,21 +64,45 @@ class FavoriteDiscovery:
             if (not new_request or previous.get('request_id') == request_id) and previous.get('expires_at', 0) > moment:
                 continue
             # This network call is outside any SQLite transaction or scan lock.
-            result = self.connector.related(seed['video_id'], limit=8)
+            result = self.connector.related(seed['video_id'], limit=25)
             if not result.ok:
                 cache[key] = {**previous, 'retry_after':moment+300, 'error':result.code or 'provider_unavailable'}
                 failures += 1
                 continue
             keys = []
             with self.database.transaction(immediate=True):
-                for track in result.items[:8]:
+                for track in result.items[:25]:
                     if track.track_key == key or not re.fullmatch(r'[\w-]{11}', track.video_id or ''):
                         continue
                     existing = self.database.get_track(track.video_id)
+                    # Never turn an already-heard or already-liked song back
+                    # into a discovery candidate. Existing unplayed discovery
+                    # rows can be enriched by a later provider response.
+                    existing_stats = next((row for row in stats if row.get('track_key') == track.track_key), None)
+                    if existing_stats and (
+                        existing_stats.get('play_count', 0) > 0
+                        or existing_stats.get('local_favorite')
+                        or existing_stats.get('liked_count', 0) > 0
+                        or existing_stats.get('like_events', 0) > 0
+                    ):
+                        continue
                     if existing is None or existing['source'] == 'favorite_discovery':
                         self.database.upsert_track(track, source='favorite_discovery')
                     keys.append(track.track_key)
-            cache[key] = {'title':seed['title'], 'track_keys':list(dict.fromkeys(keys)), 'fetched_at':moment, 'expires_at':moment+21600, 'request_id':request_id}
+            old_keys = previous.get('track_keys', []) if isinstance(previous.get('track_keys', []), list) else []
+            cache[key] = {
+                **previous,
+                'title':seed['title'],
+                'track_keys':list(dict.fromkeys([*old_keys, *keys])),
+                'fetched_at':moment,
+                'expires_at':moment+21600,
+                'request_id':request_id,
+                'retry_after':0,
+                'error':None,
+                'seed_kind':'favorite' if is_liked(seed) else 'most_listened',
+                'play_count':int(seed.get('play_count') or 0),
+                'liked':is_liked(seed),
+            }
             fetched += 1
         # Keep only current seeds; candidate tracks/history are never deleted.
         active = {seed['track_key'] for seed in seeds}
@@ -72,8 +110,22 @@ class FavoriteDiscovery:
         self.database.set_metadata('favorite_discovery_cache',json.dumps(cache))
         if request_id and not failures:
             self.database.set_metadata('favorite_discovery_request',request_id)
-        candidates = {key for value in cache.values() if value.get('expires_at',0)>moment for key in value.get('track_keys',[])}
-        status = {'state':'needs_favorites' if not seeds else 'temporarily_unavailable' if failures else 'updated' if fetched else 'cached',
+        exclusion = self.database.recommendation_exclusion_keys()
+        current = {row.get('track_key'):row for row in self.database.list_track_stats(limit=10000)}
+        candidates = {
+            key for value in cache.values() if value.get('expires_at',0)>moment
+            for key in value.get('track_keys',[])
+            if key not in exclusion and not (
+                current.get(key, {}).get('play_count', 0) > 0
+                or current.get(key, {}).get('local_favorite')
+                or current.get(key, {}).get('liked_count', 0) > 0
+                or current.get(key, {}).get('like_events', 0) > 0
+            )
+        }
+        state = 'needs_favorites' if not seeds else 'temporarily_unavailable' if failures else 'updated' if fetched else 'cached'
+        if seeds and not failures and not candidates:
+            state = 'exhausted'
+        status = {'state':state,
                   'seed_count':len(selected), 'candidate_count':len(candidates), 'error_count':failures,
                   'checked_at':datetime.fromtimestamp(moment,timezone.utc).isoformat(), 'request_id':self.database.get_metadata('favorite_discovery_request')}
         self.database.set_metadata('favorite_discovery_status',json.dumps(status))

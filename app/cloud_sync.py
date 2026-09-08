@@ -64,8 +64,12 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
             result = {"state": "unchanged", "tracks": len(tracks), "origin": origin}
             database.set_metadata("cloud_sync_status", json.dumps(result))
             return result
-        for offset in range(0, len(tracks), 20):
-            body = json.dumps({"tracks": tracks[offset:offset+20], "last_sync_at": database.get_metadata("browser_bridge_last_sync")}).encode("utf-8")
+        # Keep one import transaction for a normal library so the hosted
+        # worker rebuilds the fresh mix once, after the complete candidate set
+        # is present.  The bound still protects the request body on unusually
+        # large histories.
+        for offset in range(0, len(tracks), 500):
+            body = json.dumps({"tracks": tracks[offset:offset+500], "last_sync_at": database.get_metadata("browser_bridge_last_sync")}).encode("utf-8")
             request = Request(origin.rstrip("/") + "/api/sync/import", data=body, headers={"Content-Type": "application/json", "OAI-Sites-Authorization": "Bearer " + token}, method="POST")
             with urlopen(request, timeout=20) as response:
                 result = json.load(response)

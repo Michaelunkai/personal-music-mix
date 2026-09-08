@@ -228,10 +228,19 @@ class ScanManager:
             self.database.list_track_stats(limit=10000),
             related_candidates=related,
             limit=self.settings.recommendation_limit,
+            exclude_keys=self.database.recommendation_exclusion_keys(),
+            only_unheard=True,
         )
         recommendation_run_id = "recommend:" + uuid.uuid4().hex
         self.database.save_recommendations(recommendation_run_id, recommendations, message="Generated from local history")
         playlist_preview = self._build_playlist_preview(recommendations)
+        # Keep the historical response shape for older local API clients while
+        # the dashboard reads the fresh-only recommendation run. This preview
+        # is never published to the hosted site and does not change the
+        # unseen-only mix ledger.
+        if playlist_preview is None:
+            legacy = self.engine.recommend(self.database.list_track_stats(limit=10000), limit=self.settings.recommendation_limit)
+            playlist_preview = self._build_playlist_preview(legacy)
         summary = replace(
             summary,
             status="completed" if _connector_status(result.status) == "ok" else "partial",
@@ -378,6 +387,8 @@ class ScanManager:
             recommendations = self.engine.recommend(
                 self.database.list_track_stats(limit=10000),
                 limit=self.settings.recommendation_limit,
+                exclude_keys=self.database.recommendation_exclusion_keys(),
+                only_unheard=True,
             )
             self.database.save_recommendations(
                 "recommend:" + uuid.uuid4().hex,

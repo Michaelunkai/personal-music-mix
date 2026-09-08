@@ -122,3 +122,25 @@ test('favorite artists influence other library songs and zero-play favorites are
   assert.ok(favored.find(row=>row.track.track_key==='b').score > plain.find(row=>row.track.track_key==='b').score || favored.find(row=>row.track.track_key==='b').score > favored.find(row=>row.track.track_key==='c').score);
   assert.ok(Number.isFinite(rankTracks([rows[0]],new Set(['a']))[0].score));
 });
+
+test('fresh dashboard mode only returns unseen playable discoveries and consumes them', async () => {
+  const env={DB:database()};
+  const request = (path,body) => worker.fetch(new Request(`https://fresh.chatgpt.site${path}`, {
+    ...(body === undefined ? {} : {method:'POST',body:JSON.stringify(body)}),
+    headers:{'Content-Type':'application/json','X-Mix-Mode':'fresh'},
+  }),env);
+  const expiry=Date.now()/1000+3600;
+  const seed={track_key:'seed-top',title:'Most Played',artist:'A',video_id:'aaaaaaaaaaa',play_count:40,liked_count:0};
+  const candidate=(key,id)=>({track_key:key,title:key,artist:'A',video_id:id,play_count:0,liked_count:0,source:'favorite_discovery',discovery_seeds:[{track_key:seed.track_key,title:seed.title,seed_kind:'most_listened',play_count:40,liked:false,expires_at:expiry}]});
+  await request('/api/sync/import',{tracks:[seed,candidate('new-one','bbbbbbbbbbb'),candidate('new-two','ccccccccccc')]});
+  const first=await (await request('/api/recommendations')).json();
+  assert.deepEqual(first.items.map(item=>item.track.track_key),['new-one','new-two']);
+  assert.ok(first.items.every(item=>item.track.play_count===0 && item.reasons.some(reason=>reason.includes('listen to Most Played often'))));
+  await request('/api/scan',{});
+  assert.equal((await (await request('/api/recommendations')).json()).count,0);
+  await request('/api/sync/import',{tracks:[candidate('new-three','ddddddddddd')]});
+  const second=await (await request('/api/recommendations')).json();
+  assert.deepEqual(second.items.map(item=>item.track.track_key),['new-three']);
+  const firstKeys=new Set(first.items.map(item=>item.track.track_key));
+  assert.ok(second.items.every(item=>!firstKeys.has(item.track.track_key)));
+});

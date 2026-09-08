@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
@@ -70,9 +71,17 @@ class RecommendationEngine:
         related_candidates: Iterable[TrackRecord] = (),
         limit: int = 30,
         exclude_keys: set[str] | None = None,
+        only_unheard: bool = False,
     ) -> list[Recommendation]:
         limit = max(1, min(int(limit), 200))
         excluded = exclude_keys or set()
+        if only_unheard:
+            return self._recommend_unheard(
+                stats,
+                related_candidates=related_candidates,
+                limit=limit,
+                excluded=excluded,
+            )
         rows = [row for row in stats if str(row.get("track_key") or "") not in excluded]
         active = {row['track_key'] for row in rows if row.get('local_favorite') or _number(row.get('liked_count')) > 0 or _number(row.get('like_events')) > 0}
         moment = datetime.now(timezone.utc).timestamp()
@@ -150,4 +159,156 @@ class RecommendationEngine:
         reserved = {item.track.track_key for item in discoveries}
         anchors = [item for item in ordered if item.track.track_key not in reserved][:limit-len(discoveries)]
         ordered = anchors[:3] + discoveries + anchors[3:]
+        return [replace(item, rank=index) for index, item in enumerate(ordered, start=1)]
+
+    @staticmethod
+    def _liked(row: Mapping[str, Any]) -> bool:
+        return bool(
+            row.get("local_favorite")
+            or row.get("liked") is True
+            or _number(row.get("liked_count")) > 0
+            or _number(row.get("like_events")) > 0
+        )
+
+    @staticmethod
+    def _playable_video_id(value: Any) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z0-9_-]{11}", str(value or "")))
+
+    def _recommend_unheard(
+        self,
+        stats: Sequence[Mapping[str, Any]],
+        *,
+        related_candidates: Iterable[TrackRecord],
+        limit: int,
+        excluded: set[str],
+    ) -> list[Recommendation]:
+        """Return only new, playable songs tied to the strongest user signals.
+
+        History and liked rows are preference seeds, never output items.  The
+        explicit ``excluded`` set is the persisted served-song ledger, so a
+        refresh cannot recycle a song that was already shown in an earlier
+        completed run.
+        """
+
+        rows = [row for row in stats if str(row.get("track_key") or "")]
+        by_key = {str(row["track_key"]): row for row in rows}
+        moment = datetime.now(timezone.utc).timestamp()
+
+        def seed_weight(row: Mapping[str, Any]) -> tuple[float, float, float, str]:
+            plays = _number(row.get("play_count"))
+            liked = 1.0 if self._liked(row) else 0.0
+            return (-plays, -liked, -_recency(row.get("latest_played_at")), str(row.get("track_key")))
+
+        # Every played song can seed discovery. Explicit likes remain strong
+        # zero-play seeds, so importing a Liked Music snapshot is sufficient.
+        seeds = [
+            row
+            for row in rows
+            if (_number(row.get("play_count")) > 0 or self._liked(row))
+            and self._playable_video_id(row.get("video_id"))
+        ]
+        seeds.sort(key=seed_weight)
+        seeds = seeds[:10]
+        active_keys = {str(row["track_key"]) for row in seeds}
+        max_plays = max(1.0, *[_number(row.get("play_count")) for row in seeds])
+        artist_weights: dict[str, float] = {}
+        for seed in seeds:
+            artist = str(seed.get("artist") or "Unknown artist").casefold()
+            artist_weights[artist] = max(artist_weights.get(artist, 0.0), _number(seed.get("play_count")))
+
+        def valid_seeds(row: Mapping[str, Any]) -> list[dict[str, Any]]:
+            result: list[dict[str, Any]] = []
+            for raw in row.get("discovery_seeds") or ():
+                if not isinstance(raw, Mapping):
+                    continue
+                key = str(raw.get("track_key") or "")
+                if key not in active_keys or _number(raw.get("expires_at")) <= moment:
+                    continue
+                seed = dict(raw)
+                source = by_key.get(key)
+                seed.setdefault("title", source.get("title") if source else "a song you enjoy")
+                seed.setdefault("play_count", _number(source.get("play_count")) if source else 0)
+                seed.setdefault("liked", self._liked(source) if source else False)
+                seed.setdefault("seed_kind", "favorite" if seed.get("liked") else "most_listened")
+                result.append(seed)
+            result.sort(key=lambda value: (-_number(value.get("play_count")), not bool(value.get("liked")), str(value.get("track_key"))))
+            return result
+
+        scored: dict[str, Recommendation] = {}
+        for row in rows:
+            key = str(row.get("track_key") or "")
+            plays = _number(row.get("play_count"))
+            if (
+                key in excluded
+                or plays > 0
+                or self._liked(row)
+                or row.get("source") != "favorite_discovery"
+                or not self._playable_video_id(row.get("video_id"))
+            ):
+                continue
+            seeds_for_row = valid_seeds(row)
+            if not seeds_for_row:
+                continue
+            seed = seeds_for_row[0]
+            seed_plays = _number(seed.get("play_count"))
+            frequency = min(1.0, math.log1p(seed_plays) / max(1.0, math.log1p(max_plays)))
+            artist = str(row.get("artist") or "Unknown artist").casefold()
+            artist_affinity = min(1.0, artist_weights.get(artist, 0.0) / max_plays)
+            liked_seed = bool(seed.get("liked")) or seed.get("seed_kind") == "favorite"
+            score = 0.50 + 0.22 * frequency + 0.16 * float(liked_seed) + 0.12 * artist_affinity
+            title = str(seed.get("title") or "a song you enjoy")
+            reason = (
+                f"recommended from your favorite: {title}"
+                if liked_seed
+                else f"recommended because you listen to {title} often"
+            )
+            track = _track_from_row(row)
+            if track is None:
+                continue
+            scored[key] = Recommendation(
+                recommendation_id=_stable_id(key),
+                track=track,
+                score=min(0.99, score),
+                confidence=min(0.98, 0.45 + 0.30 * frequency + 0.15 * float(liked_seed) + 0.10 * artist_affinity),
+                reasons=(reason, "new to your listening history", f"artist affinity: {track.artist}"),
+                source="favorite_discovery",
+                generated_at=utc_now_iso(),
+            )
+
+        # A direct related response is also accepted when it is genuinely new
+        # and playable. Its reason is anchored to the strongest seed rather
+        # than presenting the related item as already heard.
+        strongest_seed = seeds[0] if seeds else None
+        for track in related_candidates:
+            if not isinstance(track, TrackRecord) or track.track_key in excluded or track.track_key in by_key or track.track_key in scored:
+                continue
+            if not self._playable_video_id(track.video_id):
+                continue
+            seed_title = str((strongest_seed or {}).get("title") or "your listening history")
+            seed_plays = _number((strongest_seed or {}).get("play_count"))
+            reason = (
+                f"recommended because you listen to {seed_title} often"
+                if seed_plays > 0
+                else f"recommended from your favorite: {seed_title}"
+            )
+            artist_affinity = min(1.0, artist_weights.get(track.artist.casefold(), 0.0) / max_plays)
+            scored[track.track_key] = Recommendation(
+                recommendation_id=_stable_id(track.track_key),
+                track=track,
+                score=min(0.90, 0.44 + 0.24 * artist_affinity),
+                confidence=min(0.90, 0.40 + 0.35 * artist_affinity),
+                reasons=(reason, "new to your listening history", f"artist affinity: {track.artist}"),
+                source="related",
+                generated_at=utc_now_iso(),
+            )
+
+        ordered = sorted(
+            scored.values(),
+            key=lambda item: (
+                -round(float(item.score), 9),
+                -round(float(item.confidence or 0), 9),
+                item.track.artist.casefold(),
+                item.track.title.casefold(),
+            ),
+        )[:limit]
         return [replace(item, rank=index) for index, item in enumerate(ordered, start=1)]

@@ -8,6 +8,23 @@ const json = (body, status=200) => Response.json(body, {status, headers:{'Cache-
 const readState = async (db,key) => { const row = await db.prepare('SELECT payload FROM music_state WHERE key=?').bind(key).first(); return row ? JSON.parse(row.payload) : null; };
 const saveState = (db,key,value) => db.prepare('INSERT INTO music_state(key,payload) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload').bind(key,JSON.stringify(value));
 const requestDiscovery = db => saveState(db,'discovery_request',{id:crypto.randomUUID(),requested_at:now()}).run();
+const asKeys = value => new Set(Array.isArray(value) ? value.filter(key => typeof key === 'string' && key) : []);
+const trackKey = item => String(item?.track?.track_key || item?.track_key || '');
+const activeItem = (item, rowsByKey, favorites, nowMs = Date.now()) => {
+  const track = item?.track || item || {};
+  const row = rowsByKey.get(track.track_key) || track;
+  const liked = favorites.has(track.track_key) || Number(row.liked_count) > 0 || Number(row.like_events) > 0 || Boolean(row.local_favorite);
+  const played = Number(row.play_count || 0) > 0;
+  const playable = /^[A-Za-z0-9_-]{11}$/.test(String(track.video_id || ''));
+  const freshSource = item?.source === 'favorite_discovery' || item?.source === 'related' || row.source === 'favorite_discovery';
+  const seeds = Array.isArray(row.discovery_seeds) ? row.discovery_seeds : [];
+  return freshSource && !played && !liked && playable && seeds.some(seed => Number(seed.expires_at) * 1000 > nowMs);
+};
+async function servedKeys(db) { return asKeys(await readState(db, 'recommendation_history')); }
+async function currentFreshItems(db, rows, favorites, fallback = []) {
+  const rowsByKey = new Map(rows.map(row => [row.track_key, row]));
+  return (Array.isArray(fallback) ? fallback : []).filter(item => activeItem(item, rowsByKey, favorites));
+}
 
 async function library(db) {
   const [tracks,favorites] = await Promise.all([
@@ -20,19 +37,27 @@ async function library(db) {
 async function rebuild(db) {
   const {rows,favorites} = await library(db);
   if (!rows.length) return {status:'failed',run:{message:'No listening history is available yet. Connect the local bridge first.'}};
-  const items = rankTracks(rows,favorites);
-  const run = {run_id:crypto.randomUUID(),status:'completed',items_seen:rows.length,finished_at:now(),message:`Mix refreshed from saved favorites and history, including ${items.filter(item=>item.source==='favorite_discovery').length} new song suggestions.`};
+  const served = await servedKeys(db);
+  const items = rankTracks(rows,favorites,20,Date.now(),{unheardOnly:true,excludeKeys:served});
+  const nextServed = [...served, ...items.map(item => trackKey(item)).filter(Boolean)];
+  const run = {run_id:crypto.randomUUID(),status:'completed',items_seen:rows.length,finished_at:now(),message:items.length
+    ? `Fresh mix built from your most-listened songs and favorites; ${items.length} songs are new to your listening history.`
+    : 'No unseen playable recommendations are available yet. Refresh to request another provider discovery batch.'};
   const previous = await readState(db,'runs') || [];
   const oldPlan = await readState(db,'playlist');
   const plan = {name:oldPlan?.name || 'Your personal mix',status:'preview',requested_count:items.length,items:items.map(row=>row.track),generated_at:now()};
-  await db.batch([saveState(db,'recommendations',items),saveState(db,'playlist',plan),saveState(db,'runs',[run,...previous].slice(0,20))]);
-  return {status:'completed',run,playlist_preview:plan};
+  await db.batch([saveState(db,'recommendations',items),saveState(db,'playlist',plan),saveState(db,'recommendation_history',nextServed),saveState(db,'runs',[run,...previous].slice(0,20))]);
+  return {status:'completed',run,recommendations:items,playlist_preview:plan};
 }
 
 async function handleApi(request,env,path) {
   const db = env.DB;
   if (!db) return json({detail:'Persistent database is unavailable'},503);
   const method = request.method;
+  // The dashboard opts into the fresh-only contract explicitly. Keeping the
+  // legacy read shape for unmarked API clients preserves compatibility for
+  // older integrations while the user-facing site always sends this header.
+  const freshRequested = request.headers.get('X-Mix-Mode') === 'fresh' || new URL(request.url).searchParams.get('unheard_only') === '1';
   const origin = request.headers.get('Origin');
   if (method !== 'GET' && origin && origin !== new URL(request.url).origin) return json({detail:'Cross-origin changes are not allowed'},403);
   if (method !== 'GET' && !request.headers.get('content-type')?.startsWith('application/json')) return json({detail:'JSON is required'},415);
@@ -43,7 +68,7 @@ async function handleApi(request,env,path) {
   };
   if(path === '/api/sync/heartbeat' && method === 'POST') {
     const {discovery} = await body();
-    if(!discovery || !['needs_favorites','temporarily_unavailable','updated','cached'].includes(discovery.state)) return json({detail:'A valid discovery status is required'},422);
+    if(!discovery || !['needs_favorites','temporarily_unavailable','updated','cached','exhausted'].includes(discovery.state)) return json({detail:'A valid discovery status is required'},422);
     await saveState(db,'companion',{received_at:now(),discovery:{state:discovery.state,
       candidate_count:Math.max(0,Number(discovery.candidate_count)||0), seed_count:Math.max(0,Number(discovery.seed_count)||0),
       checked_at:Number.isFinite(Date.parse(discovery.checked_at)) ? discovery.checked_at : null,
@@ -74,15 +99,31 @@ async function handleApi(request,env,path) {
     const payload = await body(); const plan = await readState(db,'playlist');
     if(!plan) return json({detail:'Refresh your mix first'},409);
     const {rows,favorites}=await library(db);
-    const items=rankTracks(rows,favorites).map(item=>item.track);
+    const saved = await readState(db,'recommendations') || [];
+    const items=(freshRequested ? await currentFreshItems(db,rows,favorites,saved) : rankTracks(rows,favorites)).map(item=>item.track || item);
     const updated = {...plan,name:String(payload.name || plan.name).slice(0,120),items,requested_count:items.length};
     await saveState(db,'playlist',updated).run();
     return json({plan:updated,write_enabled:false});
   }
   if(path === '/api/playlists/write') return json({detail:'Provider playlist creation requires the authenticated local YouTube connector. You can listen to this mix here.'},409);
   if(method !== 'GET') return json({detail:'Action is not available'},405);
-  if(path === '/api/recommendations') {const {rows,favorites}=await library(db);const items=rankTracks(rows,favorites);return json({items,count:items.length});}
-  if(path === '/api/playlists/latest') {let plan = await readState(db,'playlist');if(plan){const {rows,favorites}=await library(db);const items=rankTracks(rows,favorites).map(item=>item.track);plan={...plan,items,requested_count:items.length};}return json({available:!!plan,plan,write_enabled:false});}
+  if(path === '/api/recommendations') {
+    const {rows,favorites}=await library(db);
+    const items=freshRequested
+      ? await currentFreshItems(db,rows,favorites,await readState(db,'recommendations') || [])
+      : rankTracks(rows,favorites);
+    return json({items,count:items.length});
+  }
+  if(path === '/api/playlists/latest') {
+    let plan = await readState(db,'playlist');
+    if(plan){
+      const {rows,favorites}=await library(db);
+      const saved = await readState(db,'recommendations') || [];
+      const items=(freshRequested ? await currentFreshItems(db,rows,favorites,saved) : rankTracks(rows,favorites)).map(item=>item.track || item);
+      plan={...plan,items,requested_count:items.length};
+    }
+    return json({available:!!plan,plan,write_enabled:false});
+  }
   if(path === '/api/runs') return json({items:await readState(db,'runs') || []});
   if(path === '/api/favorites') { const {results:records} = await db.prepare('SELECT track_key,liked,updated_at FROM music_favorites').all(); return json({track_keys:records.filter(row=>row.liked).map(row=>row.track_key),records,source:'dashboard',discovery_request:await readState(db,'discovery_request')}); }
   if(path === '/api/status') return json({scheduler_running:false,scheduler_mode:'browser_bridge_event_driven',scheduler_healthy:true});
@@ -92,15 +133,16 @@ async function handleApi(request,env,path) {
   const connection = {state: rows.length ? 'history_cached_bridge_offline':'awaiting_browser_bridge_sync',message:rows.length ? 'Your saved library is online. Refresh mix uses your latest saved history and favorites; new YouTube history comes from the local browser bridge.':'Waiting for your listening history from the local browser bridge.',history_events:plays,tracks:rows.length,last_sync_at:sync?.source_sync_at,cloud_received_at:sync?.received_at,browser_bridge:{ready:false,live:false},hosted:true};
   const [companion,discoveryRequest] = await Promise.all([readState(db,'companion'),readState(db,'discovery_request')]);
   const companionOnline = !!companion && Date.now()-Date.parse(companion.received_at)<120000;
-  const hasFavorites=rows.some(row=>favorites.has(row.track_key)||row.liked_count>0||row.like_events>0);
+  const hasTaste=rows.some(row=>Number(row.play_count)>0||favorites.has(row.track_key)||row.liked_count>0||row.like_events>0);
   const pending=!!discoveryRequest && discoveryRequest.id !== companion?.discovery?.request_id;
   connection.companion={online:companionOnline,last_seen_at:companion?.received_at};
   connection.discovery={...companion?.discovery,pending};
-  connection.message = !hasFavorites ? 'Your saved library is ready. Add a heart to a song, or import your YouTube likes, to discover new music from favorites.'
+  connection.message = !hasTaste ? 'Your saved library is ready. Import YouTube history or likes to start a fresh mix.'
     : !companionOnline ? 'Your saved mix is ready. Fresh song suggestions will arrive when the local music app reconnects.'
     : companion?.discovery?.state === 'temporarily_unavailable' ? 'Your saved mix is ready. YouTube recommendations are temporarily unavailable; the local app will retry.'
     : pending ? 'Finding fresh songs from your favorites. Your mix will update automatically when they arrive.'
-    : companion?.discovery?.candidate_count > 0 ? 'Song suggestions from your favorites are ready. Press Refresh mix whenever you want another request.'
+    : companion?.discovery?.candidate_count > 0 ? 'Fresh songs from your listening signals are ready. Press Refresh mix whenever you want another new batch.'
+    : companion?.discovery?.state === 'exhausted' ? 'You have heard every currently available candidate. Press Refresh mix to request another provider batch.'
     : 'Your saved mix is ready. No new song suggestions are available yet; try Refresh mix again later.';
   if(path === '/api/connection') return json(connection);
   if(path === '/api/health') return json({ok:true,database:{ok:true,tracks:rows.length,history_events:plays},account_readiness:connection});

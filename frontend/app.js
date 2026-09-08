@@ -10,7 +10,7 @@ function toast(message) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, { signal: AbortSignal.timeout(20000), headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
+  const response = await fetch(path, { signal: AbortSignal.timeout(20000), headers: { "Content-Type": "application/json", "X-Mix-Mode": "fresh", ...(options.headers || {}) }, ...options });
   const text = await response.text();
   let data;
   try { data = text ? JSON.parse(text) : {}; } catch { throw new Error("Your session may have expired. Reload the page to reconnect."); }
@@ -25,8 +25,8 @@ function renderOverview(data) {
   $("#play-count").textContent = formatNumber(data.play_count);
   $("#liked-count").textContent = formatNumber(data.liked_track_count);
   $("#taste-copy").textContent = data.liked_track_count
-    ? `Your mix uses ${formatNumber(data.provider_liked_track_count)} imported YouTube likes and ${formatNumber(data.local_favorite_count)} dashboard favorites, together with listening history. Favorite songs below to refine your mix.`
-    : "No confirmed favorites have been imported yet. This mix uses saved listening history. Use the heart buttons to save favorites and refine it.";
+    ? `Your mix starts with your most-listened songs and uses ${formatNumber(data.provider_liked_track_count)} imported YouTube likes plus ${formatNumber(data.local_favorite_count)} dashboard favorites. Every song in For you is new to your listening history.`
+    : "No confirmed favorites are imported yet. Your mix starts with your most-listened songs; add a heart or import YouTube likes to give discovery stronger preference signals. For you only shows songs you have not heard.";
 }
 
 function renderRecommendations(items) {
@@ -34,7 +34,7 @@ function renderRecommendations(items) {
   $("#play-mix").disabled = !items.some(item => videoId(item.track || {}));
   const root = $("#recommendations");
   $("#recommendation-count").textContent = `${items.length} songs`;
-  if (!items.length) { root.className = "recommendations empty"; root.textContent = state.query ? "No songs match this search. Try another title or artist." : state.view === 'favorites' ? "Your favorites will appear here. Save a song with the heart button to get started." : "Your music will appear after your first history sync."; return; }
+  if (!items.length) { root.className = "recommendations empty"; root.textContent = state.query ? "No songs match this search. Try another title or artist." : state.view === 'favorites' ? "Your favorites will appear here. Save a song with the heart button to get started." : "No new songs are ready yet. Press Refresh mix to request another fresh batch."; return; }
   root.className = "recommendations";
   const rendered = items.map((item, index) => {
     const track = item.track || {};
@@ -56,7 +56,7 @@ function renderLatestPlaylist(data) {
   const root = $("#playlist-preview");
   if (!data?.available || !data.plan) {
     root.className = "preview empty";
-    root.textContent = "A preview appears automatically after the first successful history scan.";
+    root.textContent = "A fresh playlist preview appears when unseen recommendations arrive.";
     state.latestPlan = null;
     $("#write-button").disabled = true;
     return;
@@ -141,7 +141,7 @@ function renderCollection() {
 
 async function scan() {
   const button = $("#scan-button"); button.disabled = true; button.textContent = "Refreshing…";
-  try { const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) }); if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed"); toast(result.discovery_pending ? "Mix refreshed. Fresh song suggestions requested; see connection status below." : "Mix refreshed from your available history and favorites."); await refresh(); }
+  try { const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) }); if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed"); toast(result.recommendations?.length ? "Fresh mix ready with new songs." : "Fresh request sent. New songs will appear when the provider discovery batch arrives."); await refresh(); }
   catch (error) { toast(error.message); } finally { button.disabled = false; button.textContent = "Refresh mix"; }
 }
 
