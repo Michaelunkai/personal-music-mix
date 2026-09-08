@@ -201,7 +201,7 @@ async function scan() {
     // cache has candidates. Do not make the user wait for the companion's
     // next background discovery request in that case; wait the full bounded
     // window only when this scan returned no fresh items.
-    const hasFreshBatch = Array.isArray(result.recommendations) && result.recommendations.length > 0;
+    const hasFreshBatch = Array.isArray(result.recommendations) && result.recommendations.length >= 20;
     const hosted = hasFreshBatch ? null : await waitForHostedRefresh({ timeoutMs: 60000 });
     const hostedPending = Boolean(hosted?.hosted && hosted?.discovery?.pending);
     const bridgeOffline = !bridge?.ok;

@@ -200,11 +200,26 @@ test('Refresh uses a returned fresh batch without waiting on background discover
   const h = harness();
   vm.runInContext('globalThis.waitCalls = 0; waitForHostedRefresh = async () => { globalThis.waitCalls += 1; return {}; }', h.context);
   const original = h.context.fetch;
+  const fullBatch = Array.from({ length: 20 }, (_, index) => ({
+    track: { track_key: `video:full-${String(index).padStart(2, '0')}`, video_id: 'aaaaaaaaaaa', title: `Full song ${index}`, artist: 'Artist' },
+  }));
   h.context.fetch = async url => {
-    if (url === '/api/scan') return { ok: true, text: async () => JSON.stringify({ status: 'completed', recommendations: h.context.tracks }) };
+    if (url === '/api/scan') return { ok: true, text: async () => JSON.stringify({ status: 'completed', recommendations: fullBatch }) };
     if (url === '/api/recommendations') return { ok: true, text: async () => JSON.stringify({ items: h.context.tracks }) };
     return original(url);
   };
   await vm.runInContext('scan()', h.context);
   assert.equal(vm.runInContext('globalThis.waitCalls', h.context), 0);
+});
+
+test('Refresh waits for provider discovery when the returned batch is partial', async () => {
+  const h = harness();
+  vm.runInContext('globalThis.waitCalls = 0; waitForHostedRefresh = async () => { globalThis.waitCalls += 1; return {}; }', h.context);
+  const original = h.context.fetch;
+  h.context.fetch = async url => {
+    if (url === '/api/scan') return { ok: true, text: async () => JSON.stringify({ status: 'completed', recommendations: [h.context.tracks[0]] }) };
+    return original(url);
+  };
+  await vm.runInContext('scan()', h.context);
+  assert.equal(vm.runInContext('globalThis.waitCalls', h.context), 1);
 });
