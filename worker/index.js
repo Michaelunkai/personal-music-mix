@@ -18,7 +18,7 @@ const activeItem = (item, rowsByKey, favorites, nowMs = Date.now()) => {
   const track = item?.track || item || {};
   const row = rowsByKey.get(track.track_key) || track;
   const liked = favorites.has(track.track_key) || Number(row.liked_count) > 0 || Number(row.like_events) > 0 || Boolean(row.local_favorite);
-  const played = Number(row.play_count || 0) > 0 || Number.isFinite(Date.parse(row.latest_played_at));
+  const played = Number(row.play_count || 0) > 0 || (row.latest_played_at !== null && row.latest_played_at !== undefined && String(row.latest_played_at).trim() !== '');
   const playable = playableVideoId(track.video_id);
   const freshSource = item?.source === 'favorite_discovery' || item?.source === 'related' || row.source === 'favorite_discovery' || row.source === 'related';
   const seeds = Array.isArray(row.discovery_seeds) ? row.discovery_seeds : [];
@@ -47,18 +47,41 @@ async function servedLedger(db, rows = []) {
 async function servedKeys(db) {
   return (await servedLedger(db)).keys;
 }
+const releaseReservation = (db, reservationId) => db.prepare('DELETE FROM music_served WHERE reservation_id=?').bind(reservationId).run();
 async function reserveFreshItems(db, items) {
   const reservationId = crypto.randomUUID();
+  const candidates = [];
+  const seen = new Set();
   for (const item of items) {
     const key = trackKey(item);
     const videoId = trackVideoId(item);
-    if (!key || !playableVideoId(videoId)) continue;
-    await db.prepare('INSERT OR IGNORE INTO music_served(track_key,video_id,served_at,reservation_id) VALUES(?,?,?,?)')
-      .bind(key,videoId,now(),reservationId).run();
+    const identity = `${key}\u0000${videoId}`;
+    if (!key || !playableVideoId(videoId) || seen.has(identity)) continue;
+    seen.add(identity);
+    candidates.push(item);
   }
-  const {results} = await db.prepare('SELECT track_key,video_id FROM music_served WHERE reservation_id=?').bind(reservationId).all();
-  const reserved = new Set((results || []).map(row => `${row.track_key}\u0000${row.video_id}`));
-  return items.filter(item => reserved.has(`${trackKey(item)}\u0000${trackVideoId(item)}`));
+  if (!candidates.length) return {items:[],reservationId};
+  try {
+    await db.batch(candidates.map(item => db.prepare('INSERT OR IGNORE INTO music_served(track_key,video_id,served_at,reservation_id) VALUES(?,?,?,?)')
+      .bind(trackKey(item),trackVideoId(item),now(),reservationId)));
+    const {results} = await db.prepare('SELECT track_key,video_id FROM music_served WHERE reservation_id=?').bind(reservationId).all();
+    const reserved = new Set((results || []).map(row => `${row.track_key}\u0000${row.video_id}`));
+    return {items:candidates.filter(item => reserved.has(`${trackKey(item)}\u0000${trackVideoId(item)}`)),reservationId};
+  } catch (error) {
+    try { await releaseReservation(db,reservationId); } catch {}
+    throw error;
+  }
+}
+async function recordServedKeys(db, keys, rows = []) {
+  const rowsByKey = new Map(rows.map(row => [row.track_key, row]));
+  const unique = [...asKeys(keys)];
+  const statements = unique.map(key => {
+    const videoId = rowsByKey.get(key)?.video_id;
+    return db.prepare('INSERT OR IGNORE INTO music_served(track_key,video_id,served_at,reservation_id) VALUES(?,?,?,NULL)')
+      .bind(key,playableVideoId(videoId) ? videoId : null,now());
+  });
+  for (let index = 0; index < statements.length; index += 200) await db.batch(statements.slice(index,index + 200));
+  return unique.length;
 }
 async function currentFreshItems(db, rows, favorites, fallback = []) {
   const rowsByKey = new Map(rows.map(row => [row.track_key, row]));
@@ -79,16 +102,39 @@ async function library(db) {
   return {rows:tracks.results.map(row=>JSON.parse(row.payload)), favorites:new Set(favorites.results.map(row=>row.track_key))};
 }
 
-const rebuildLocks = new WeakMap();
+const databaseLocks = new WeakMap();
+async function withDatabaseLock(db, work) {
+  const previous = databaseLocks.get(db) || Promise.resolve();
+  let release;
+  const current = new Promise(resolve => { release = resolve; });
+  databaseLocks.set(db, previous.then(() => current));
+  try {
+    await previous;
+    return await work();
+  } finally {
+    release();
+  }
+}
 async function rebuildUnlocked(db) {
   const {rows,favorites} = await library(db);
   if (!rows.length) return {status:'failed',run:{message:'No listening history is available yet. Connect the local bridge first.'}};
-  const served = await servedLedger(db,rows);
-  const rankedItems = rankTracks(rows,favorites,20,Date.now(),{unheardOnly:true,excludeKeys:served.keys,excludeVideoIds:served.videos});
+  await db.prepare("DELETE FROM music_served WHERE reservation_id IS NOT NULL AND julianday(served_at) < julianday('now','-15 minutes')").run();
+  let served = await servedLedger(db,rows);
+  let rankedItems = rankTracks(rows,favorites,20,Date.now(),{unheardOnly:true,excludeKeys:served.keys,excludeVideoIds:served.videos});
   // The durable unique video index is the reservation boundary.  It closes
   // the race where two refreshes read the same served set before either one
   // writes its next visible batch.
-  const freshItems = await reserveFreshItems(db,rankedItems);
+  let reservation = await reserveFreshItems(db,rankedItems);
+  // A separate Worker isolate can win the same reservation race between the
+  // ledger read and the insert batch. Re-read the durable table once so that
+  // contention advances to the next unseen batch instead of publishing an
+  // empty batch that discarded still-available candidates.
+  if (!reservation.items.length && rankedItems.length) {
+    served = await servedLedger(db,rows);
+    rankedItems = rankTracks(rows,favorites,20,Date.now(),{unheardOnly:true,excludeKeys:served.keys,excludeVideoIds:served.videos});
+    reservation = await reserveFreshItems(db,rankedItems);
+  }
+  const freshItems = reservation.items;
   // Every completed refresh replaces the visible batch with only songs that
   // are new to the listening history and absent from the durable served
   // ledger. Never preserve the previous batch: doing so makes a partial
@@ -102,20 +148,16 @@ async function rebuildUnlocked(db) {
   const previous = await readState(db,'runs') || [];
   const oldPlan = await readState(db,'playlist');
   const plan = {name:oldPlan?.name || 'Your personal mix',status:'preview',requested_count:visibleItems.length,items:visibleItems.map(row=>row.track || row),generated_at:freshItems.length ? now() : (oldPlan?.generated_at || now())};
-  await db.batch([saveState(db,'recommendations',visibleItems),saveState(db,'playlist',plan),saveState(db,'recommendation_history',nextServed),saveState(db,'runs',[run,...previous].slice(0,20))]);
+  try {
+    await db.batch([saveState(db,'recommendations',visibleItems),saveState(db,'playlist',plan),saveState(db,'recommendation_history',nextServed),saveState(db,'runs',[run,...previous].slice(0,20)),db.prepare('UPDATE music_served SET reservation_id=NULL WHERE reservation_id=?').bind(reservation.reservationId)]);
+  } catch (error) {
+    try { await releaseReservation(db,reservation.reservationId); } catch {}
+    throw error;
+  }
   return {status:'completed',run,recommendations:freshItems,playlist_preview:plan,preserved_previous_mix:false};
 }
 async function rebuild(db) {
-  const previous = rebuildLocks.get(db) || Promise.resolve();
-  let release;
-  const current = new Promise(resolve => { release = resolve; });
-  rebuildLocks.set(db, previous.then(() => current));
-  try {
-    await previous;
-    return await rebuildUnlocked(db);
-  } finally {
-    release();
-  }
+  return withDatabaseLock(db, () => rebuildUnlocked(db));
 }
 
 async function handleApi(request,env,path) {
@@ -146,10 +188,15 @@ async function handleApi(request,env,path) {
   if(path === '/api/sync/ledger' && method === 'POST') {
     const payload = await body();
     if(!Array.isArray(payload.served_keys) || payload.served_keys.length > MAX_LEDGER_INPUT_KEYS) return json({detail:'A bounded served_keys array is required'},422);
-    const current = await servedKeys(db);
-    const merged = mergeKeys([...current], [...asKeys(payload.served_keys)]);
-    await saveState(db,'local_served_keys',merged).run();
-    return json({status:'completed',served_keys:merged.length});
+    const result = await withDatabaseLock(db, async () => {
+      const current = await servedKeys(db);
+      const merged = mergeKeys([...current], [...asKeys(payload.served_keys)]);
+      const {rows} = await library(db);
+      await recordServedKeys(db,payload.served_keys,rows);
+      await saveState(db,'local_served_keys',merged).run();
+      return {status:'completed',served_keys:(await servedLedger(db,rows)).keys.size};
+    });
+    return json(result);
   }
   if (path === '/api/sync/import' && method === 'POST') {
     const payload = await body(); const tracks = normalizeImport(payload);

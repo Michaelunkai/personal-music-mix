@@ -200,6 +200,34 @@ test('background accepts dashboard refresh only from approved origins', async ()
   assert.equal(sent.length, 2);
 });
 
+test('background reports an unacknowledged history refresh as unavailable', async () => {
+  const listeners = {};
+  const event = name => ({ addListener: fn => { listeners[name] = fn; } });
+  const context = vm.createContext({
+    URL, AbortSignal,
+    fetch: async () => ({ ok: true, json: async () => ({}) }),
+    chrome: {
+      runtime: { onInstalled: event('installed'), onStartup: event('startup'), onMessage: event('message') },
+      alarms: { create() {}, onAlarm: event('alarm') },
+      tabs: {
+        onUpdated: event('updated'),
+        query: async () => [{ id: 10, url: 'https://music.youtube.com/history' }],
+        sendMessage: async () => ({ ok: false, error: 'Bridge is unavailable' }),
+      },
+      scripting: { executeScript: async () => {} },
+      storage: { local: { get: async defaults => defaults } },
+      action: { onClicked: event('clicked') },
+    },
+  });
+  vm.runInContext(source('background.js'), context);
+  const result = await new Promise(resolve => listeners.message(
+    { type: 'dashboard-refresh-request', request_id: 'refresh-unavailable' },
+    { url: 'https://personal-music-mix.michaelovsky55555.chatgpt.site/' },
+    resolve,
+  ));
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { ok: false, tabs: 1, acknowledged: 0, request_id: 'refresh-unavailable' });
+});
+
 test('background creates one inactive history tab when none is open, including concurrent refreshes', async () => {
   const listeners = {};
   const event = name => ({ addListener: fn => { listeners[name] = fn; } });

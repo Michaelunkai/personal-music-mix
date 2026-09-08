@@ -13,7 +13,7 @@ function database() {
     bind(...values) { return prepare(sql,values); },
     async first() { return sqlite.prepare(sql).get(...args) || null; },
     async all() { return { results: sqlite.prepare(sql).all(...args) }; },
-    async run() { sqlite.prepare(sql).run(...args); return {success:true}; },
+    async run() { const result=sqlite.prepare(sql).run(...args); return {success:true,meta:{changes:Number(result.changes || 0)}}; },
   });
   return {prepare,async batch(items) {sqlite.exec('BEGIN');try {const results=[];for(const item of items)results.push(await item.run());sqlite.exec('COMMIT');return results;}catch(e){sqlite.exec('ROLLBACK');throw e;}}};
 }
@@ -292,6 +292,7 @@ test('fresh refreshes deduplicate video IDs and reject timestamp-heard songs', a
     discovery('duplicate-a','Duplicate A','bbbbbbbbbbb'),
     discovery('duplicate-b','Duplicate B','bbbbbbbbbbb'),
     discovery('timestamp-heard','Timestamp Heard','ccccccccccc',{latest_played_at:new Date().toISOString()}),
+    discovery('malformed-timestamp','Malformed Timestamp','eeeeeeeeeee',{latest_played_at:'not-a-date'}),
     {track_key:'related-song',title:'Related Song',artist:'Related Artist',video_id:'ddddddddddd',play_count:0,liked_count:0,source:'related'},
   ],defer_rebuild:true});
   const first=await (await request('/api/scan',{})).json();

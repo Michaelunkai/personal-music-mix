@@ -64,6 +64,9 @@ export function rankTracks(rows, favorites, limit = 20, now = Date.now(), option
 function liked(row, favorites) {
   return favorites.has(row.track_key) || Number(row.liked_count) > 0 || Number(row.like_events) > 0 || Boolean(row.local_favorite);
 }
+function hasPlayedEvidence(value) {
+  return value !== null && value !== undefined && String(value).trim() !== '';
+}
 
 function playable(row) { return /^[A-Za-z0-9_-]{11}$/.test(String(row.video_id || '')); }
 
@@ -106,8 +109,7 @@ function rankUnheard(rows, favorites, limit, now, excluded, excludedVideos) {
   for (const row of rows) {
     const plays = Number(row.play_count || 0);
     const isLiked = liked(row, favorites);
-    const heardAt = Date.parse(row.latest_played_at);
-    if (excluded.has(row.track_key) || excludedVideos.has(row.video_id) || plays > 0 || Number.isFinite(heardAt) || isLiked || row.source !== 'favorite_discovery' || !playable(row)) continue;
+    if (excluded.has(row.track_key) || excludedVideos.has(row.video_id) || plays > 0 || hasPlayedEvidence(row.latest_played_at) || isLiked || row.source !== 'favorite_discovery' || !playable(row)) continue;
     const seedsForRow = seedFor(row);
     if (!seedsForRow.length) continue;
     const seed = seedsForRow[0];
@@ -125,8 +127,7 @@ function rankUnheard(rows, favorites, limit, now, excluded, excludedVideos) {
   // only unseen playable rows that have an active listening seed.
   const strongest = seeds[0];
   for (const row of rows) {
-    const heardAt = Date.parse(row.latest_played_at);
-    if (row.source !== 'related' || excluded.has(row.track_key) || excludedVideos.has(row.video_id) || Number(row.play_count || 0) > 0 || Number.isFinite(heardAt) || liked(row, favorites) || !playable(row) || scored.has(row.track_key) || !strongest) continue;
+    if (row.source !== 'related' || excluded.has(row.track_key) || excludedVideos.has(row.video_id) || Number(row.play_count || 0) > 0 || hasPlayedEvidence(row.latest_played_at) || liked(row, favorites) || !playable(row) || scored.has(row.track_key) || !strongest) continue;
     const reason = Number(strongest.play_count || 0) > 0
       ? `recommended because you listen to ${strongest.title} often`
       : `recommended from your favorite: ${strongest.title}`;

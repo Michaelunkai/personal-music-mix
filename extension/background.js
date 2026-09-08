@@ -142,7 +142,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
     }
     requestHistoryTabsSync()
-      .then((result) => sendResponse({ ok: true, tabs: result.count, acknowledged: result.acknowledged, request_id: message.request_id || "" }))
+      .then((result) => sendResponse({ ok: result.count > 0 && result.acknowledged === result.count, tabs: result.count, acknowledged: result.acknowledged, request_id: message.request_id || "" }))
       .catch((error) => sendResponse({ ok: false, error: String(error) }));
     return true;
   }
