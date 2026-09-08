@@ -71,6 +71,25 @@ def test_forced_refresh_retry_survives_valid_cache_and_cooldown():
         assert len(provider.calls)==4
 
 
+def test_explicit_favorite_keeps_a_discovery_seed_slot_with_large_history():
+    with Database() as db:
+        listened = [track(letter) for letter in 'abcde']
+        favorite = track('f', 'Pinned Favorite')
+        for index, item in enumerate(listened):
+            db.upsert_track(item)
+            db.record_history_event(item.video_id, source_event_id=f'played-{index}', title=item.title, artist=item.artist)
+        db.upsert_track(favorite)
+        db.set_like(favorite.video_id, True)
+        provider = Provider((track('z'),))
+        service = FavoriteDiscovery(db, provider)
+
+        service.refresh()
+
+        assert favorite.video_id in provider.calls
+        cache = json.loads(db.get_metadata('favorite_discovery_cache'))
+        assert cache[favorite.track_key]['seed_kind'] == 'favorite'
+
+
 def test_expiry_is_projected_without_network_and_other_seed_retains_candidate():
     with Database() as db:
         seeds=[track('a'),track('c')];candidate=track('b')

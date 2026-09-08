@@ -40,8 +40,18 @@ class FavoriteDiscovery:
                  if (row.get('play_count', 0) > 0 or is_liked(row))
                  and re.fullmatch(r'[\w-]{11}', row.get('video_id') or '')]
         seeds.sort(key=lambda row: (-int(row.get('play_count') or 0), -int(is_liked(row)), row['track_key']))
+        # Always give explicit favorites a seed slot. A large history should
+        # not crowd zero-play favorites out of discovery just because their
+        # play count is lower.
+        favorite_seeds = [row for row in seeds if is_liked(row)]
+        listened_seeds = [row for row in seeds if not is_liked(row)]
+        favorite_seeds.sort(key=lambda row: (-int(row.get('liked_count') or 0),
+                                             -int(row.get('like_events') or 0),
+                                             -int(row.get('play_count') or 0), row['track_key']))
+        listened_seeds.sort(key=lambda row: (-int(row.get('play_count') or 0),
+                                             -int(row.get('liked_count') or 0), row['track_key']))
         new_request = bool(request_id and request_id != self.database.get_metadata('favorite_discovery_request'))
-        if new_request and seeds:
+        if new_request and listened_seeds:
             # Rotate the leading seed window on each acknowledged refresh. A
             # request ID is still used as the durable acknowledgement key, but
             # the sequence avoids repeatedly selecting the same top three rows.
@@ -50,9 +60,12 @@ class FavoriteDiscovery:
             except (TypeError, ValueError):
                 sequence = 1
             self.database.set_metadata('favorite_discovery_sequence', str(sequence))
-            offset = (sequence * 3) % len(seeds)
-            seeds = seeds[offset:] + seeds[:offset]
-        selected = seeds[:3]
+            offset = (sequence * 3) % len(listened_seeds)
+            listened_seeds = listened_seeds[offset:] + listened_seeds[:offset]
+        selected = favorite_seeds[:3]
+        selected.extend(row for row in listened_seeds if row not in selected)
+        selected = selected[:3]
+        seeds = [*favorite_seeds, *listened_seeds]
         failures = 0
         fetched = 0
         for seed in selected:
