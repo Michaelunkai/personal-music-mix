@@ -13,3 +13,9 @@ export const state = sqliteTable('music_state', {
   key: text('key').primaryKey(),
   payload: text('payload').notNull(),
 });
+export const served = sqliteTable('music_served', {
+  trackKey: text('track_key').primaryKey(),
+  videoId: text('video_id').unique(),
+  servedAt: text('served_at').notNull(),
+  reservationId: text('reservation_id'),
+});

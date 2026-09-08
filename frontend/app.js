@@ -205,8 +205,10 @@ async function scan() {
     const hasFreshBatch = Array.isArray(result.recommendations) && result.recommendations.length > 0;
     const hosted = hasFreshBatch ? null : await waitForHostedRefresh({ timeoutMs: 60000 });
     const hostedPending = Boolean(hosted?.hosted && hosted?.discovery?.pending);
+    const providerExhausted = hosted?.discovery?.state === "exhausted";
     const bridgeOffline = !bridge?.ok;
-    if (bridgeOffline && hostedPending) toast("Refresh requested from saved history; the browser bridge and hosted discovery are still reconnecting.");
+    if (providerExhausted) toast("No new unseen songs are available in the current provider pool yet. Refresh again later for another discovery batch.");
+    else if (bridgeOffline && hostedPending) toast("Refresh requested from saved history; the browser bridge and hosted discovery are still reconnecting.");
     else if (bridgeOffline) toast(result.recommendations?.length ? "Fresh mix ready from saved history. Connect YouTube Music for live account updates." : "Refresh requested from saved history. New songs will appear when provider discovery arrives.");
     else if (hostedPending) toast("Live history received. Fresh discovery is still arriving; your mix will update automatically.");
     else toast(result.recommendations?.length ? "Fresh mix ready with new songs." : "Fresh request sent. New songs will appear when the provider discovery batch arrives.");

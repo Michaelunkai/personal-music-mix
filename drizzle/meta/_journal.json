@@ -8,6 +8,13 @@
       "when": 1788818173515,
       "tag": "0000_lively_gressill",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788892800000,
+      "tag": "0001_durable_served_ledger",
+      "breakpoints": true
     }
   ]
 }

@@ -8,6 +8,7 @@ import {normalizeImport,rankTracks} from '../worker/domain.js';
 function database() {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(readFileSync(new URL('../drizzle/0000_lively_gressill.sql', import.meta.url), 'utf8'));
+  sqlite.exec(readFileSync(new URL('../drizzle/0001_durable_served_ledger.sql', import.meta.url), 'utf8'));
   const prepare = (sql, args=[]) => ({
     bind(...values) { return prepare(sql,values); },
     async first() { return sqlite.prepare(sql).get(...args) || null; },
@@ -276,6 +277,58 @@ test('repeated fresh refreshes consume a finite pool without recycling and end e
   const finalRefresh=await (await request('/api/recommendations')).json();
   assert.equal(finalRefresh.count,0);
   assert.deepEqual(finalRefresh.items,[]);
+});
+
+test('fresh refreshes deduplicate video IDs and reject timestamp-heard songs', async () => {
+  const env={DB:database()};
+  const request=(path,body)=>worker.fetch(new Request(`https://video-identity.chatgpt.site${path}`,{
+    ...(body===undefined?{}:{method:'POST',body:JSON.stringify(body)}),
+    headers:{'Content-Type':'application/json','X-Mix-Mode':'fresh'},
+  }),env);
+  const expiry=Date.now()/1000+3600;
+  const seed={track_key:'identity-seed',title:'Most Played Seed',artist:'Signal Artist',video_id:'aaaaaaaaaaa',play_count:50,liked_count:0};
+  const discovery=(key,title,videoId,extra={})=>({track_key:key,title,artist:'Discovery Artist',video_id:videoId,play_count:0,liked_count:0,source:'favorite_discovery',discovery_seeds:[{track_key:seed.track_key,title:seed.title,seed_kind:'most_listened',play_count:seed.play_count,liked:false,expires_at:expiry}],...extra});
+  await request('/api/sync/import',{tracks:[seed,
+    discovery('duplicate-a','Duplicate A','bbbbbbbbbbb'),
+    discovery('duplicate-b','Duplicate B','bbbbbbbbbbb'),
+    discovery('timestamp-heard','Timestamp Heard','ccccccccccc',{latest_played_at:new Date().toISOString()}),
+    {track_key:'related-song',title:'Related Song',artist:'Related Artist',video_id:'ddddddddddd',play_count:0,liked_count:0,source:'related'},
+  ],defer_rebuild:true});
+  const first=await (await request('/api/scan',{})).json();
+  assert.deepEqual(first.recommendations.map(item=>item.track.track_key),['duplicate-a','related-song']);
+  assert.equal(new Set(first.recommendations.map(item=>item.track.video_id)).size,first.recommendations.length);
+  const visible=await (await request('/api/recommendations')).json();
+  assert.deepEqual(visible.items.map(item=>item.track.track_key),['duplicate-a','related-song']);
+  const second=await (await request('/api/scan',{})).json();
+  assert.deepEqual(second.recommendations,[]);
+});
+
+test('concurrent fresh refreshes reserve disjoint batches', async () => {
+  const env={DB:database()};
+  const request=(path,body)=>worker.fetch(new Request(`https://concurrent.chatgpt.site${path}`,{
+    ...(body===undefined?{}:{method:'POST',body:JSON.stringify(body)}),
+    headers:{'Content-Type':'application/json','X-Mix-Mode':'fresh'},
+  }),env);
+  const expiry=Date.now()/1000+3600;
+  const seed={track_key:'concurrent-seed',title:'Most Played Seed',artist:'Signal Artist',video_id:'aaaaaaaaaaa',play_count:50,liked_count:0};
+  const candidates=Array.from({length:40},(_,index)=>({track_key:`concurrent-${index}`,title:`Concurrent Candidate ${index}`,artist:'Discovery Artist',video_id:String(index+100).padStart(11,'0'),play_count:0,liked_count:0,source:'favorite_discovery',discovery_seeds:[{track_key:seed.track_key,title:seed.title,seed_kind:'most_listened',play_count:seed.play_count,liked:false,expires_at:expiry}]}));
+  await request('/api/sync/import',{tracks:[seed,...candidates],defer_rebuild:true});
+  const responses=await Promise.all([request('/api/scan',{}),request('/api/scan',{})]);
+  const batches=await Promise.all(responses.map(response=>response.json()));
+  const keys=batches.map(batch=>batch.recommendations.map(item=>item.track.track_key));
+  assert.ok(keys.every(batch=>batch.length>0));
+  assert.equal(keys[0].filter(key=>keys[1].includes(key)).length,0);
+  assert.equal(new Set(keys.flat()).size,40);
+});
+
+test('served-key synchronization does not evict older exclusions', async () => {
+  const env={DB:database()};
+  const request=(path,body)=>worker.fetch(new Request(`https://ledger-capacity.chatgpt.site${path}`,{
+    method:'POST',body:JSON.stringify(body),headers:{'Content-Type':'application/json','X-Mix-Mode':'fresh'},
+  }),env);
+  const older=Array.from({length:100000},(_,index)=>`served-${index}`);
+  assert.equal((await (await request('/api/sync/ledger',{served_keys:older})).json()).served_keys,100000);
+  assert.equal((await (await request('/api/sync/ledger',{served_keys:['newest-served']})).json()).served_keys,100001);
 });
 
 test('hosted served ledger excludes songs already shown by the local publisher', async () => {

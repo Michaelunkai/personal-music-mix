@@ -14,7 +14,7 @@ export function normalizeImport(payload) {
       like_events: count(row.like_events), latest_played_at: row.latest_played_at || null,
       local_favorite: Boolean(row.local_favorite),
       local_favorite_updated_at: Number.isFinite(Date.parse(row.local_favorite_updated_at)) ? new Date(row.local_favorite_updated_at).toISOString() : null,
-      source: row.source === 'favorite_discovery' ? 'favorite_discovery' : 'history',
+      source: row.source === 'favorite_discovery' || row.source === 'related' ? row.source : 'history',
       discovery_seeds: (Array.isArray(row.discovery_seeds) ? row.discovery_seeds : []).slice(0,30)
         .filter(seed => typeof seed?.track_key === 'string' && seed.track_key.length <= 300 && Number.isFinite(seed.expires_at))
         .map(seed => ({track_key:seed.track_key, title:String(seed.title || 'a song you enjoy').slice(0,500), expires_at:seed.expires_at,
@@ -27,7 +27,8 @@ export function normalizeImport(payload) {
 export function rankTracks(rows, favorites, limit = 20, now = Date.now(), options = {}) {
   const unheardOnly = Boolean(options?.unheardOnly);
   const excluded = new Set(options?.excludeKeys || []);
-  if (unheardOnly) return rankUnheard(rows, favorites, limit, now, excluded);
+  const excludedVideos = new Set(options?.excludeVideoIds || []);
+  if (unheardOnly) return rankUnheard(rows, favorites, limit, now, excluded, excludedVideos);
   const active = new Set(rows.filter(row => favorites.has(row.track_key) || row.liked_count > 0 || row.like_events > 0).map(row=>row.track_key));
   const seedsFor = row => (row.discovery_seeds || []).filter(seed=>active.has(seed.track_key) && seed.expires_at * 1000 > now);
   rows = rows.filter(row => row.source !== 'favorite_discovery' || row.play_count > 0 || active.has(row.track_key) || seedsFor(row).length);
@@ -66,7 +67,7 @@ function liked(row, favorites) {
 
 function playable(row) { return /^[A-Za-z0-9_-]{11}$/.test(String(row.video_id || '')); }
 
-function rankUnheard(rows, favorites, limit, now, excluded) {
+function rankUnheard(rows, favorites, limit, now, excluded, excludedVideos) {
   const byKey = new Map(rows.map(row => [row.track_key, row]));
   const seedRows = rows.filter(row => (Number(row.play_count) > 0 || liked(row, favorites)) && playable(row));
   const favoriteSeeds = seedRows.filter(row => liked(row, favorites))
@@ -105,7 +106,8 @@ function rankUnheard(rows, favorites, limit, now, excluded) {
   for (const row of rows) {
     const plays = Number(row.play_count || 0);
     const isLiked = liked(row, favorites);
-    if (excluded.has(row.track_key) || plays > 0 || isLiked || row.source !== 'favorite_discovery' || !playable(row)) continue;
+    const heardAt = Date.parse(row.latest_played_at);
+    if (excluded.has(row.track_key) || excludedVideos.has(row.video_id) || plays > 0 || Number.isFinite(heardAt) || isLiked || row.source !== 'favorite_discovery' || !playable(row)) continue;
     const seedsForRow = seedFor(row);
     if (!seedsForRow.length) continue;
     const seed = seedsForRow[0];
@@ -123,14 +125,22 @@ function rankUnheard(rows, favorites, limit, now, excluded) {
   // only unseen playable rows that have an active listening seed.
   const strongest = seeds[0];
   for (const row of rows) {
-    if (row.source !== 'related' || excluded.has(row.track_key) || byKey.has(row.track_key) || !playable(row) || scored.has(row.track_key) || !strongest) continue;
+    const heardAt = Date.parse(row.latest_played_at);
+    if (row.source !== 'related' || excluded.has(row.track_key) || excludedVideos.has(row.video_id) || Number(row.play_count || 0) > 0 || Number.isFinite(heardAt) || liked(row, favorites) || !playable(row) || scored.has(row.track_key) || !strongest) continue;
     const reason = Number(strongest.play_count || 0) > 0
       ? `recommended because you listen to ${strongest.title} often`
       : `recommended from your favorite: ${strongest.title}`;
     scored.set(row.track_key, {track:row,score:.44,confidence:.40,reasons:[reason,'new to your listening history',`artist affinity: ${row.artist || 'Unknown artist'}`],source:'related'});
   }
+  const seenVideoIds = new Set();
   return [...scored.values()]
     .sort((a,b) => b.score - a.score || b.confidence - a.confidence || String(a.track.artist || '').localeCompare(String(b.track.artist || '')) || String(a.track.title || '').localeCompare(String(b.track.title || '')))
+    .filter(item => {
+      const videoId = item.track.video_id;
+      if (seenVideoIds.has(videoId)) return false;
+      seenVideoIds.add(videoId);
+      return true;
+    })
     .slice(0, Math.max(1, Math.min(Number(limit) || 20, 200)))
     .map((row,i) => ({...row,rank:i+1}));
 }

@@ -9,28 +9,67 @@ const readState = async (db,key) => { const row = await db.prepare('SELECT paylo
 const saveState = (db,key,value) => db.prepare('INSERT INTO music_state(key,payload) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload').bind(key,JSON.stringify(value));
 const requestDiscovery = db => saveState(db,'discovery_request',{id:crypto.randomUUID(),requested_at:now()}).run();
 const asKeys = value => new Set(Array.isArray(value) ? value.filter(key => typeof key === 'string' && key) : []);
-const MAX_LEDGER_KEYS = 100000;
-const mergeKeys = (current, incoming) => [...new Set([...current, ...incoming])].slice(0, MAX_LEDGER_KEYS);
+const MAX_LEDGER_INPUT_KEYS = 100000;
+const mergeKeys = (current, incoming) => [...new Set([...current, ...incoming])];
 const trackKey = item => String(item?.track?.track_key || item?.track_key || '');
+const trackVideoId = item => String(item?.track?.video_id || item?.video_id || '');
+const playableVideoId = value => /^[A-Za-z0-9_-]{11}$/.test(String(value || ''));
 const activeItem = (item, rowsByKey, favorites, nowMs = Date.now()) => {
   const track = item?.track || item || {};
   const row = rowsByKey.get(track.track_key) || track;
   const liked = favorites.has(track.track_key) || Number(row.liked_count) > 0 || Number(row.like_events) > 0 || Boolean(row.local_favorite);
-  const played = Number(row.play_count || 0) > 0;
-  const playable = /^[A-Za-z0-9_-]{11}$/.test(String(track.video_id || ''));
-  const freshSource = item?.source === 'favorite_discovery' || item?.source === 'related' || row.source === 'favorite_discovery';
+  const played = Number(row.play_count || 0) > 0 || Number.isFinite(Date.parse(row.latest_played_at));
+  const playable = playableVideoId(track.video_id);
+  const freshSource = item?.source === 'favorite_discovery' || item?.source === 'related' || row.source === 'favorite_discovery' || row.source === 'related';
   const seeds = Array.isArray(row.discovery_seeds) ? row.discovery_seeds : [];
-  return freshSource && !played && !liked && playable && seeds.some(seed => Number(seed.expires_at) * 1000 > nowMs);
+  const related = item?.source === 'related' || row.source === 'related';
+  return freshSource && !played && !liked && playable && (related || seeds.some(seed => Number(seed.expires_at) * 1000 > nowMs));
 };
-async function servedKeys(db) {
-  return new Set([
-    ...asKeys(await readState(db, 'recommendation_history')),
-    ...asKeys(await readState(db, 'local_served_keys')),
+async function servedLedger(db, rows = []) {
+  const [history, local, records] = await Promise.all([
+    readState(db, 'recommendation_history'),
+    readState(db, 'local_served_keys'),
+    db.prepare('SELECT track_key,video_id FROM music_served').all(),
   ]);
+  const keys = new Set([...asKeys(history), ...asKeys(local)]);
+  const videos = new Set();
+  for (const record of records.results || []) {
+    if (record.track_key) keys.add(record.track_key);
+    if (playableVideoId(record.video_id)) videos.add(record.video_id);
+  }
+  const rowsByKey = new Map(rows.map(row => [row.track_key, row]));
+  for (const key of keys) {
+    const videoId = rowsByKey.get(key)?.video_id;
+    if (playableVideoId(videoId)) videos.add(videoId);
+  }
+  return {keys, videos};
+}
+async function servedKeys(db) {
+  return (await servedLedger(db)).keys;
+}
+async function reserveFreshItems(db, items) {
+  const reservationId = crypto.randomUUID();
+  for (const item of items) {
+    const key = trackKey(item);
+    const videoId = trackVideoId(item);
+    if (!key || !playableVideoId(videoId)) continue;
+    await db.prepare('INSERT OR IGNORE INTO music_served(track_key,video_id,served_at,reservation_id) VALUES(?,?,?,?)')
+      .bind(key,videoId,now(),reservationId).run();
+  }
+  const {results} = await db.prepare('SELECT track_key,video_id FROM music_served WHERE reservation_id=?').bind(reservationId).all();
+  const reserved = new Set((results || []).map(row => `${row.track_key}\u0000${row.video_id}`));
+  return items.filter(item => reserved.has(`${trackKey(item)}\u0000${trackVideoId(item)}`));
 }
 async function currentFreshItems(db, rows, favorites, fallback = []) {
   const rowsByKey = new Map(rows.map(row => [row.track_key, row]));
-  return (Array.isArray(fallback) ? fallback : []).filter(item => activeItem(item, rowsByKey, favorites));
+  const seenVideoIds = new Set();
+  return (Array.isArray(fallback) ? fallback : []).filter(item => {
+    if (!activeItem(item, rowsByKey, favorites)) return false;
+    const videoId = trackVideoId(item);
+    if (seenVideoIds.has(videoId)) return false;
+    seenVideoIds.add(videoId);
+    return true;
+  });
 }
 async function library(db) {
   const [tracks,favorites] = await Promise.all([
@@ -40,18 +79,23 @@ async function library(db) {
   return {rows:tracks.results.map(row=>JSON.parse(row.payload)), favorites:new Set(favorites.results.map(row=>row.track_key))};
 }
 
-async function rebuild(db) {
+const rebuildLocks = new WeakMap();
+async function rebuildUnlocked(db) {
   const {rows,favorites} = await library(db);
   if (!rows.length) return {status:'failed',run:{message:'No listening history is available yet. Connect the local bridge first.'}};
-  const served = await servedKeys(db);
-  const freshItems = rankTracks(rows,favorites,20,Date.now(),{unheardOnly:true,excludeKeys:served});
+  const served = await servedLedger(db,rows);
+  const rankedItems = rankTracks(rows,favorites,20,Date.now(),{unheardOnly:true,excludeKeys:served.keys,excludeVideoIds:served.videos});
+  // The durable unique video index is the reservation boundary.  It closes
+  // the race where two refreshes read the same served set before either one
+  // writes its next visible batch.
+  const freshItems = await reserveFreshItems(db,rankedItems);
   // Every completed refresh replaces the visible batch with only songs that
   // are new to the listening history and absent from the durable served
   // ledger. Never preserve the previous batch: doing so makes a partial
   // provider response look healthy while recycling songs the user already
   // saw. An empty result is an honest exhausted/awaiting-discovery state.
   const visibleItems = freshItems;
-  const nextServed = mergeKeys([...served], freshItems.map(item => trackKey(item)).filter(Boolean));
+  const nextServed = mergeKeys([...served.keys], freshItems.map(item => trackKey(item)).filter(Boolean));
   const run = {run_id:crypto.randomUUID(),status:'completed',items_seen:rows.length,finished_at:now(),message:freshItems.length
     ? `Fresh mix built from your most-listened songs and favorites; ${freshItems.length} songs are new to your listening history.`
     : 'No new unseen songs are available yet. Refresh requested another provider discovery batch.'};
@@ -60,6 +104,18 @@ async function rebuild(db) {
   const plan = {name:oldPlan?.name || 'Your personal mix',status:'preview',requested_count:visibleItems.length,items:visibleItems.map(row=>row.track || row),generated_at:freshItems.length ? now() : (oldPlan?.generated_at || now())};
   await db.batch([saveState(db,'recommendations',visibleItems),saveState(db,'playlist',plan),saveState(db,'recommendation_history',nextServed),saveState(db,'runs',[run,...previous].slice(0,20))]);
   return {status:'completed',run,recommendations:freshItems,playlist_preview:plan,preserved_previous_mix:false};
+}
+async function rebuild(db) {
+  const previous = rebuildLocks.get(db) || Promise.resolve();
+  let release;
+  const current = new Promise(resolve => { release = resolve; });
+  rebuildLocks.set(db, previous.then(() => current));
+  try {
+    await previous;
+    return await rebuildUnlocked(db);
+  } finally {
+    release();
+  }
 }
 
 async function handleApi(request,env,path) {
@@ -89,7 +145,7 @@ async function handleApi(request,env,path) {
   }
   if(path === '/api/sync/ledger' && method === 'POST') {
     const payload = await body();
-    if(!Array.isArray(payload.served_keys) || payload.served_keys.length > MAX_LEDGER_KEYS) return json({detail:'A bounded served_keys array is required'},422);
+    if(!Array.isArray(payload.served_keys) || payload.served_keys.length > MAX_LEDGER_INPUT_KEYS) return json({detail:'A bounded served_keys array is required'},422);
     const current = await servedKeys(db);
     const merged = mergeKeys([...current], [...asKeys(payload.served_keys)]);
     await saveState(db,'local_served_keys',merged).run();
@@ -171,7 +227,7 @@ async function handleApi(request,env,path) {
     : companion?.discovery?.state === 'temporarily_unavailable' ? 'Your saved mix is ready. YouTube recommendations are temporarily unavailable; the local app will retry.'
     : pending ? 'Finding fresh songs from your favorites. Your mix will update automatically when they arrive.'
     : companion?.discovery?.candidate_count > 0 ? 'Fresh songs from your listening signals are ready. Press Refresh mix whenever you want another new batch.'
-    : companion?.discovery?.state === 'exhausted' ? 'You have heard every currently available candidate. Press Refresh mix to request another provider batch.'
+    : companion?.discovery?.state === 'exhausted' ? 'You have already seen every currently available candidate. Press Refresh mix to request another provider batch.'
     : 'Your saved mix is ready. No new song suggestions are available yet; try Refresh mix again later.';
   if(path === '/api/connection') return json(connection);
   if(path === '/api/health') return json({ok:true,database:{ok:true,tracks:rows.length,history_events:plays},account_readiness:connection});
