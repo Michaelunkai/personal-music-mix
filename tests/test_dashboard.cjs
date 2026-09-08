@@ -46,7 +46,7 @@ function harness() {
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../frontend/app.js'), 'utf8'), context);
   context.tracks = tracks;
   vm.runInContext('renderRecommendations(tracks)', context);
-  return { context, node, loads, jumps, configs, posts, windowListeners };
+  return { context, node, loads, jumps, configs, posts, windowListeners, windowObject };
 }
 
 test('an activity error preserves successfully loaded music', async () => {
@@ -140,6 +140,15 @@ test('Play builds the correct queue; polling does not stop or replace playback',
   assert.deepEqual(h.jumps, [0]);
 });
 
+test('Play mix keeps the saved fresh mix when browsing the library', async () => {
+  const h = harness();
+  const libraryTrack = { track: { track_key: 'video:ccccccccccc', video_id: 'ccccccccccc', title: 'Library song', artist: 'Other' }, score: 0.2 };
+  h.context.libraryTrack = libraryTrack;
+  vm.runInContext("state.library = [...tracks, libraryTrack]; state.view = 'all'; renderCollection()", h.context);
+  await vm.runInContext('playMix()', h.context);
+  assert.deepEqual(h.loads, [{ ids: ['aaaaaaaaaaa', 'bbbbbbbbbbb'], index: 0 }]);
+});
+
 test('restricted playback and autoplay blocking have visible recovery instructions', async () => {
   const h = harness();
   await vm.runInContext('playTrack(0)', h.context);
@@ -173,4 +182,16 @@ test('Refresh mix signals the installed bridge before requesting a new batch', a
   assert.equal(h.posts.length, 1);
   assert.equal(h.posts[0].message.type, 'ytmusic-personal-mix-refresh');
   assert.equal(h.posts[0].origin, 'http://127.0.0.1:8000');
+});
+
+test('Refresh remains usable but explains when the live bridge is unavailable', async () => {
+  const h = harness();
+  h.windowObject.postMessage = (message, origin) => {
+    h.posts.push({ message, origin });
+    if (message.type !== 'ytmusic-personal-mix-refresh') return;
+    const result = { type: 'ytmusic-personal-mix-refresh-result', request_id: message.request_id, ok: false, tabs: 0, acknowledged: 0, timed_out: true };
+    h.windowListeners.slice().forEach(listener => listener({ source: h.windowObject, origin, data: result }));
+  };
+  await vm.runInContext('scan()', h.context);
+  assert.match(h.node('#toast').textContent, /saved history/);
 });

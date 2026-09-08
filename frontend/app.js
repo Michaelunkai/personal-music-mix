@@ -1,5 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { latestPlan: null, schedulerRunning: false, recommendations: [], ranked: [], library: [], view: 'mix', query: '', favorites: new Set(), favoritesReady:false, queue: [], queueIndex: 0, player: null, playerReady: null, playerLoading: false, refreshing: false };
+const state = { latestPlan: null, schedulerRunning: false, recommendations: [], mixRecommendations: [], ranked: [], library: [], view: 'mix', query: '', favorites: new Set(), favoritesReady:false, queue: [], queueIndex: 0, player: null, playerReady: null, playerLoading: false, refreshing: false };
 
 function toast(message) {
   const node = $("#toast");
@@ -31,7 +31,11 @@ function renderOverview(data) {
 
 function renderRecommendations(items) {
   state.recommendations = items;
-  $("#play-mix").disabled = !items.some(item => videoId(item.track || {}));
+  // Direct callers (including the initial render in older integrations) may
+  // not have populated ranked yet; keep their first mix as the saved queue.
+  if (state.view === 'mix' && !state.ranked.length) state.mixRecommendations = items.slice();
+  const mixItems = state.mixRecommendations.length ? state.mixRecommendations : items;
+  $("#play-mix").disabled = !mixItems.some(item => videoId(item.track || {}));
   const root = $("#recommendations");
   $("#recommendation-count").textContent = `${items.length} songs`;
   if (!items.length) { root.className = "recommendations empty"; root.textContent = state.query ? "No songs match this search. Try another title or artist." : state.view === 'favorites' ? "Your favorites will appear here. Save a song with the heart button to get started." : "No new songs are ready yet. Press Refresh mix to request another fresh batch."; return; }
@@ -157,8 +161,25 @@ function requestBridgeRefresh({ timeoutMs = 4000 } = {}) {
   });
 }
 
+async function waitForHostedRefresh({ timeoutMs = 15000, intervalMs = 750 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    try { latest = await api("/api/connection"); } catch { return latest; }
+    // The local app has no hosted discovery queue. A hosted response only
+    // needs waiting when its companion is online and still acknowledging the
+    // request made by this refresh.
+    if (!latest?.hosted || latest?.discovery?.pending !== true || latest?.companion?.online !== true) return latest;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await new Promise(resolve => window.setTimeout(resolve, Math.min(intervalMs, remaining)));
+  }
+  return latest;
+}
+
 function renderCollection() {
   let items = state.view === 'mix' ? state.ranked : state.library;
+  if (state.view === 'mix') state.mixRecommendations = items.slice();
   if (state.view === 'favorites') items = items.filter(item => state.favorites.has(item.track.track_key) || item.track.liked_count > 0 || item.track.like_events > 0);
   const query = state.query.trim().toLocaleLowerCase();
   if (query) items = items.filter(item => `${item.track.title} ${item.track.artist} ${item.track.album || ''}`.toLocaleLowerCase().includes(query));
@@ -167,7 +188,19 @@ function renderCollection() {
 
 async function scan() {
   const button = $("#scan-button"); button.disabled = true; button.textContent = "Refreshing…";
-  try { await requestBridgeRefresh(); const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) }); if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed"); toast(result.recommendations?.length ? "Fresh mix ready with new songs." : "Fresh request sent. New songs will appear when the provider discovery batch arrives."); await refresh(); }
+  try {
+    const bridge = await requestBridgeRefresh();
+    const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) });
+    if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed");
+    const hosted = await waitForHostedRefresh();
+    const hostedPending = Boolean(hosted?.hosted && hosted?.discovery?.pending);
+    const bridgeOffline = !bridge?.ok;
+    if (bridgeOffline && hostedPending) toast("Refresh requested from saved history; the browser bridge and hosted discovery are still reconnecting.");
+    else if (bridgeOffline) toast(result.recommendations?.length ? "Fresh mix ready from saved history. Connect YouTube Music for live account updates." : "Refresh requested from saved history. New songs will appear when provider discovery arrives.");
+    else if (hostedPending) toast("Live history received. Fresh discovery is still arriving; your mix will update automatically.");
+    else toast(result.recommendations?.length ? "Fresh mix ready with new songs." : "Fresh request sent. New songs will appear when the provider discovery batch arrives.");
+    await refresh();
+  }
   catch (error) { toast(error.message); } finally { button.disabled = false; button.textContent = "Refresh mix"; }
 }
 
@@ -265,9 +298,13 @@ async function ensurePlayer() {
 }
 
 async function playTrack(index) {
+  return playTrackFrom(state.recommendations, index);
+}
+
+async function playTrackFrom(items, index) {
   if (state.playerLoading) return;
-  const selected = state.recommendations[index]?.track;
-  state.queue = state.recommendations.map(item => item.track).filter(track => videoId(track));
+  const selected = items[index]?.track;
+  state.queue = items.map(item => item.track).filter(track => videoId(track));
   state.queueIndex = Math.max(0, state.queue.findIndex(track => track.track_key === selected?.track_key));
   if (!state.queue.length) return toast("No playable YouTube song IDs are available in this mix.");
   updatePlayingInfo();
@@ -279,6 +316,12 @@ async function playTrack(index) {
     $("#player-status").textContent = "Starting song… If playback pauses, press play inside the player.";
   } catch (error) { $("#player-status").textContent = error.message; }
   finally { state.playerLoading = false; }
+}
+
+function playMix() {
+  const items = state.mixRecommendations.length ? state.mixRecommendations : state.ranked;
+  if (!items.length) return toast("No fresh songs are ready in this mix yet.");
+  return playTrackFrom(items, 0);
 }
 
 function changeTrack(delta) {
@@ -298,7 +341,7 @@ document.addEventListener("DOMContentLoaded", () => {
     document.querySelectorAll('[data-view]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
     renderCollection();
   }));
-  $("#play-mix").addEventListener("click", () => playTrack(0));
+  $("#play-mix").addEventListener("click", playMix);
   $("#previous-track").addEventListener("click", () => changeTrack(-1));
   $("#next-track").addEventListener("click", () => changeTrack(1));
   $("#recommendations").addEventListener("click", async event => {
