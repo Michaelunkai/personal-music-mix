@@ -192,7 +192,11 @@ async function scan() {
     const bridge = await requestBridgeRefresh();
     const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) });
     if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed");
-    const hosted = await waitForHostedRefresh();
+    // A live bridge acknowledgement means the local publisher has a new
+    // snapshot to deliver, so give that hosted import enough time to finish.
+    // With no bridge there is no new account snapshot to wait for; keep the
+    // cached refresh responsive while the background publisher continues.
+    const hosted = await waitForHostedRefresh({ timeoutMs: bridge?.ok ? 60000 : 2500 });
     const hostedPending = Boolean(hosted?.hosted && hosted?.discovery?.pending);
     const bridgeOffline = !bridge?.ok;
     if (bridgeOffline && hostedPending) toast("Refresh requested from saved history; the browser bridge and hosted discovery are still reconnecting.");
