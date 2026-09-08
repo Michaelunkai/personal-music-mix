@@ -79,15 +79,18 @@ test('hosted refresh queues discovery and only acknowledged delivery clears pend
   const call=(path,payload)=>worker.fetch(new Request('https://test.chatgpt.site'+path,payload===undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),env);
   const seed={track_key:'seed',title:'Seed',artist:'A',video_id:'a'.repeat(11),play_count:10};
   const candidate={track_key:'new',title:'Discovery',artist:'B',video_id:'b'.repeat(11),source:'favorite_discovery',discovery_seeds:[{track_key:'seed',title:'Seed',expires_at:Date.now()/1000+300}]};
-  await call('/api/sync/import',{tracks:[seed,candidate]});
+  await call('/api/sync/import',{tracks:[seed]});
   await call('/api/favorites',{track_key:'seed',liked:true});
+  await call('/api/sync/import',{tracks:[seed,candidate]});
   assert.equal((await (await call('/api/recommendations')).json()).count,2);
+  const activePreview=await (await call('/api/playlists/preview',{name:'Before expiry'})).json();
+  assert.deepEqual(activePreview.plan.items.map(track=>track.track_key),['new']);
   const originalNow=Date.now;
   try {
     Date.now=()=>originalNow()+600000;
     const expiredPreview=await (await call('/api/playlists/preview',{name:'After expiry'})).json();
-    assert.equal(expiredPreview.plan.items.length,1);
-    assert.equal(expiredPreview.plan.requested_count,1);
+    assert.equal(expiredPreview.plan.items.length,0);
+    assert.equal(expiredPreview.plan.requested_count,0);
     assert.equal(expiredPreview.plan.name,'After expiry');
   } finally {Date.now=originalNow;}
   await call('/api/scan',{});

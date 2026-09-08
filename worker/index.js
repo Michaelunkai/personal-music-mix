@@ -106,7 +106,10 @@ async function handleApi(request,env,path) {
     if(!plan) return json({detail:'Refresh your mix first'},409);
     const {rows,favorites}=await library(db);
     const saved = await readState(db,'recommendations') || [];
-    const items=(freshRequested ? await currentFreshItems(db,rows,favorites,saved) : rankTracks(rows,favorites)).map(item=>item.track || item);
+    // A saved playlist name must never resurrect heard or expired songs.  The
+    // dashboard already requests fresh mode, but this endpoint also enforces
+    // the same unread-only contract for direct/API callers without that header.
+    const items=(await currentFreshItems(db,rows,favorites,saved)).map(item=>item.track || item);
     const updated = {...plan,name:String(payload.name || plan.name).slice(0,120),items,requested_count:items.length};
     await saveState(db,'playlist',updated).run();
     return json({plan:updated,write_enabled:false});
