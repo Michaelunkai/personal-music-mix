@@ -49,3 +49,51 @@ def test_zero_play_favorite_and_favorite_artist_affinity():
     scores={item.track.track_key:item.score for item in engine.recommend(rows)}
     assert scores['video:b'] > scores['video:c']
     assert engine.recommend([]) == []
+
+
+def test_unheard_mix_keeps_candidates_from_rotated_listening_seed():
+    import time
+
+    seeds = [
+        {
+            "track_key": f"video:{index:011d}",
+            "title": f"Top seed {index}",
+            "artist": "Top artist",
+            "video_id": f"{index:011d}",
+            "play_count": 10,
+            "liked_count": 0,
+        }
+        for index in range(10)
+    ]
+    rotated = {
+        "track_key": "video:99999999999",
+        "title": "Rotated seed",
+        "artist": "Rotated artist",
+        "video_id": "99999999999",
+        "play_count": 1,
+        "liked_count": 0,
+    }
+    candidate = {
+        "track_key": "video:88888888888",
+        "title": "Rotated discovery",
+        "artist": "Discovery artist",
+        "video_id": "88888888888",
+        "play_count": 0,
+        "liked_count": 0,
+        "source": "favorite_discovery",
+        "discovery_seeds": [{
+            "track_key": rotated["track_key"],
+            "title": rotated["title"],
+            "seed_kind": "most_listened",
+            "play_count": rotated["play_count"],
+            "liked": False,
+            "expires_at": time.time() + 3600,
+        }],
+    }
+    result = RecommendationEngine().recommend(
+        [*seeds, rotated, candidate],
+        limit=5,
+        exclude_keys=set(),
+        only_unheard=True,
+    )
+    assert [item.track.track_key for item in result] == [candidate["track_key"]]

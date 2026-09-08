@@ -68,18 +68,21 @@ function playable(row) { return /^[A-Za-z0-9_-]{11}$/.test(String(row.video_id |
 
 function rankUnheard(rows, favorites, limit, now, excluded) {
   const byKey = new Map(rows.map(row => [row.track_key, row]));
-  const allSeeds = rows.filter(row => (Number(row.play_count) > 0 || liked(row, favorites)) && playable(row));
-  const favoriteSeeds = allSeeds.filter(row => liked(row, favorites))
+  const seedRows = rows.filter(row => (Number(row.play_count) > 0 || liked(row, favorites)) && playable(row));
+  const favoriteSeeds = seedRows.filter(row => liked(row, favorites))
     .sort((a,b) => Number(b.liked_count || 0) - Number(a.liked_count || 0)
       || Number(b.like_events || 0) - Number(a.like_events || 0)
       || Number(b.play_count || 0) - Number(a.play_count || 0)
       || String(a.track_key).localeCompare(String(b.track_key)));
-  const listenedSeeds = allSeeds.filter(row => !liked(row, favorites))
+  const listenedSeeds = seedRows.filter(row => !liked(row, favorites))
     .sort((a,b) => Number(b.play_count || 0) - Number(a.play_count || 0)
       || Number(b.liked_count || 0) - Number(a.liked_count || 0)
       || String(a.track_key).localeCompare(String(b.track_key)));
-  const seeds = [...favoriteSeeds, ...listenedSeeds].slice(0, 10);
-  const active = new Set(seeds.map(row => row.track_key));
+  const allSeeds = [...favoriteSeeds, ...listenedSeeds];
+  // Scoring stays focused on the strongest ten signals, while every current
+  // playable seed remains active so rotated cached discovery cannot disappear.
+  const seeds = allSeeds.slice(0, 10);
+  const active = new Set(allSeeds.map(row => row.track_key));
   const maxPlays = Math.max(1, ...seeds.map(row => Number(row.play_count || 0)));
   const artistWeights = new Map();
   for (const seed of seeds) {

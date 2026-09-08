@@ -210,8 +210,12 @@ class RecommendationEngine:
         seeds.sort(key=seed_weight)
         favorite_seeds = [row for row in seeds if self._liked(row)]
         listened_seeds = [row for row in seeds if not self._liked(row)]
+        # Keep the strongest ten seeds for scoring, but keep every playable
+        # listening/favorite row active for cached discovery lineage. A later
+        # refresh may rotate to a weaker seed; its provider-confirmed songs
+        # must remain eligible instead of making the mix look exhausted.
+        all_seed_keys = {str(row["track_key"]) for row in [*favorite_seeds, *listened_seeds]}
         seeds = [*favorite_seeds, *listened_seeds][:10]
-        active_keys = {str(row["track_key"]) for row in seeds}
         max_plays = max(1.0, *[_number(row.get("play_count")) for row in seeds])
         artist_weights: dict[str, float] = {}
         for seed in seeds:
@@ -224,7 +228,7 @@ class RecommendationEngine:
                 if not isinstance(raw, Mapping):
                     continue
                 key = str(raw.get("track_key") or "")
-                if key not in active_keys or _number(raw.get("expires_at")) <= moment:
+                if key not in all_seed_keys or _number(raw.get("expires_at")) <= moment:
                     continue
                 seed = dict(raw)
                 source = by_key.get(key)

@@ -196,3 +196,26 @@ test('fresh recommendations prioritize explicit favorite seeds', async () => {
   assert.ok(fresh.items[0].reasons.includes('recommended from your favorite: Pinned Favorite'));
   assert.ok(fresh.items.every(item=>item.track.play_count===0 && item.source==='favorite_discovery'));
 });
+
+test('hosted fresh mix keeps candidates from rotated listening seeds', async () => {
+  const env={DB:database()};
+  const request=(path,body)=>worker.fetch(new Request(`https://rotated.chatgpt.site${path}`,{
+    ...(body===undefined?{}:{method:'POST',body:JSON.stringify(body)}),
+    headers:{'Content-Type':'application/json','X-Mix-Mode':'fresh'},
+  }),env);
+  const expiry=Date.now()/1000+3600;
+  const seeds=Array.from({length:10},(_,index)=>({
+    track_key:`seed-${index}`,
+    title:`Top seed ${index}`,
+    artist:'Top artist',
+    video_id:String(index).padStart(11,'0'),
+    play_count:10,
+    liked_count:0,
+  }));
+  const rotated={track_key:'seed-rotated',title:'Rotated seed',artist:'Rotated artist',video_id:'99999999999',play_count:1,liked_count:0};
+  const candidate={track_key:'candidate-rotated',title:'Rotated discovery',artist:'Discovery artist',video_id:'88888888888',play_count:0,liked_count:0,source:'favorite_discovery',discovery_seeds:[{track_key:rotated.track_key,title:rotated.title,seed_kind:'most_listened',play_count:1,liked:false,expires_at:expiry}]};
+  await request('/api/sync/import',{tracks:[...seeds,rotated,candidate]});
+  const fresh=await (await request('/api/recommendations')).json();
+  assert.deepEqual(fresh.items.map(item=>item.track.track_key),[candidate.track_key]);
+  assert.ok(fresh.items[0].reasons.some(reason=>reason.includes('Rotated seed')));
+});
