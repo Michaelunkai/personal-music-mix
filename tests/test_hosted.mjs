@@ -142,7 +142,7 @@ test('favorite artists influence other library songs and zero-play favorites are
   assert.ok(Number.isFinite(rankTracks([rows[0]],new Set(['a']))[0].score));
 });
 
-test('fresh dashboard mode only returns unseen playable discoveries and consumes them', async () => {
+test('fresh dashboard mode only returns unseen playable discoveries and clears an exhausted batch', async () => {
   const env={DB:database()};
   const request = (path,body) => worker.fetch(new Request(`https://fresh.chatgpt.site${path}`, {
     ...(body === undefined ? {} : {method:'POST',body:JSON.stringify(body)}),
@@ -157,8 +157,13 @@ test('fresh dashboard mode only returns unseen playable discoveries and consumes
   assert.ok(first.items.every(item=>item.track.play_count===0 && item.reasons.some(reason=>reason.includes('listen to Most Played often'))));
   const exhausted=await (await request('/api/scan',{})).json();
   assert.deepEqual(exhausted.recommendations,[]);
-  assert.equal(exhausted.preserved_previous_mix,true);
-  assert.equal((await (await request('/api/recommendations')).json()).count,2);
+  assert.equal(exhausted.preserved_previous_mix,false);
+  assert.equal(exhausted.playlist_preview.requested_count,0);
+  assert.deepEqual(exhausted.playlist_preview.items,[]);
+  assert.match(exhausted.run.message,/No new unseen songs are available yet/);
+  const afterExhaustion=await (await request('/api/recommendations')).json();
+  assert.equal(afterExhaustion.count,0);
+  assert.deepEqual(afterExhaustion.items,[]);
   await request('/api/sync/import',{tracks:[candidate('new-three','ddddddddddd')]});
   const second=await (await request('/api/recommendations')).json();
   assert.deepEqual(second.items.map(item=>item.track.track_key),['new-three']);
@@ -166,7 +171,7 @@ test('fresh dashboard mode only returns unseen playable discoveries and consumes
   assert.ok(second.items.every(item=>!firstKeys.has(item.track.track_key)));
 });
 
-test('refresh preserves the current fresh 20-song mix when no new candidates arrive', async () => {
+test('refresh replaces a full fresh mix with an empty visible batch when no candidates arrive', async () => {
   const env={DB:database()};
   const request=(path,body)=>worker.fetch(new Request(`https://preserve.chatgpt.site${path}`,{
     ...(body===undefined?{}:{method:'POST',body:JSON.stringify(body)}),
@@ -192,20 +197,21 @@ test('refresh preserves the current fresh 20-song mix when no new candidates arr
 
   const refreshed=await (await request('/api/scan',{})).json();
   assert.deepEqual(refreshed.recommendations,[]);
-  assert.equal(refreshed.preserved_previous_mix,true);
-  assert.equal(refreshed.playlist_preview.requested_count,20);
-  assert.deepEqual(new Set(refreshed.playlist_preview.items.map(item=>item.track_key)),firstKeys);
-  assert.match(refreshed.run.message,/No new unseen songs arrived; your current 20-song mix stays available/);
+  assert.equal(refreshed.preserved_previous_mix,false);
+  assert.equal(refreshed.playlist_preview.requested_count,0);
+  assert.deepEqual(refreshed.playlist_preview.items,[]);
+  assert.match(refreshed.run.message,/No new unseen songs are available yet/);
 
   const recommendations=await (await request('/api/recommendations')).json();
-  assert.equal(recommendations.count,20);
-  assert.deepEqual(new Set(recommendations.items.map(item=>item.track.track_key)),firstKeys);
+  assert.equal(recommendations.count,0);
+  assert.deepEqual(recommendations.items,[]);
   const latest=await (await request('/api/playlists/latest')).json();
-  assert.equal(latest.plan.requested_count,20);
-  assert.deepEqual(new Set(latest.plan.items.map(item=>item.track_key)),firstKeys);
+  assert.equal(latest.plan.requested_count,0);
+  assert.deepEqual(latest.plan.items,[]);
+  assert.ok([...firstKeys].every(key=>!latest.plan.items.some(item=>item.track_key===key)));
 });
 
-test('refresh preserves a full favorite mix when a smaller listening-only batch arrives', async () => {
+test('refresh replaces a full fresh mix with a smaller unseen batch without overlap', async () => {
   const env={DB:database()};
   const request=(path,body)=>worker.fetch(new Request(`https://favorite-preserve.chatgpt.site${path}`,{
     ...(body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),
@@ -219,11 +225,57 @@ test('refresh preserves a full favorite mix when a smaller listening-only batch 
   const listeningSeed={track_key:'listening-root',title:'Most Played',artist:'Listening Artist',video_id:'ggggggggggg',play_count:50,liked_count:0};
   const listeningItems=Array.from({length:9},(_,index)=>({track_key:`listening-${index}`,title:`Listening discovery ${index}`,artist:'Other Artist',video_id:String(index+30).padStart(11,'0'),play_count:0,liked_count:0,source:'favorite_discovery',discovery_seeds:[{track_key:listeningSeed.track_key,title:listeningSeed.title,seed_kind:'most_listened',play_count:50,liked:false,expires_at:expiry}]}));
   const second=await (await request('/api/sync/import',{tracks:[listeningSeed,...listeningItems]})).json();
-  assert.equal(second.preserved_previous_mix,true);
-  assert.deepEqual(second.recommendations,[]);
-  assert.equal(second.playlist_preview.items.length,20);
-  assert.ok(second.playlist_preview.items.every(item=>item.track_key.startsWith('favorite-')));
-  assert.match(second.run.message,/favorite-aligned/);
+  const firstKeys=new Set(first.recommendations.map(item=>item.track.track_key));
+  const secondKeys=new Set(second.recommendations.map(item=>item.track.track_key));
+  assert.equal(firstKeys.size,20);
+  assert.equal(second.preserved_previous_mix,false);
+  assert.equal(second.recommendations.length,listeningItems.length);
+  assert.deepEqual([...secondKeys].sort(),listeningItems.map(item=>item.track_key).sort());
+  assert.equal(second.playlist_preview.requested_count,listeningItems.length);
+  assert.deepEqual(new Set(second.playlist_preview.items.map(item=>item.track_key)),secondKeys);
+  assert.ok([...secondKeys].every(key=>!firstKeys.has(key)));
+  assert.match(second.run.message,/9 songs are new/);
+});
+
+test('repeated fresh refreshes consume a finite pool without recycling and end empty', async () => {
+  const env={DB:database()};
+  const request=(path,body)=>worker.fetch(new Request(`https://finite-pool.chatgpt.site${path}`,
+    body===undefined ? {headers:{'X-Mix-Mode':'fresh'}} : {method:'POST',body:JSON.stringify(body),headers:{'Content-Type':'application/json','X-Mix-Mode':'fresh'}}),env);
+  const expiry=Date.now()/1000+3600;
+  const seed={track_key:'finite-seed',title:'Most Played Seed',artist:'Signal Artist',video_id:'aaaaaaaaaaa',play_count:50,liked_count:0};
+  const candidates=Array.from({length:45},(_,index)=>({
+    track_key:`finite-${index}`,
+    title:`Finite Candidate ${index}`,
+    artist:'Discovery Artist',
+    video_id:String(index+100).padStart(11,'0'),
+    play_count:0,
+    liked_count:0,
+    source:'favorite_discovery',
+    discovery_seeds:[{track_key:seed.track_key,title:seed.title,seed_kind:'most_listened',play_count:seed.play_count,liked:false,expires_at:expiry}],
+  }));
+  const imported=await (await request('/api/sync/import',{tracks:[seed,...candidates],defer_rebuild:true})).json();
+  assert.equal(imported.status,'completed');
+  assert.equal(imported.rebuild_deferred,true);
+
+  const batches=[];
+  const seen=new Set();
+  for(let refreshIndex=0;refreshIndex<4;refreshIndex++) {
+    const refreshed=await (await request('/api/scan',{})).json();
+    const keys=refreshed.recommendations.map(item=>item.track.track_key);
+    assert.equal(new Set(keys).size,keys.length);
+    assert.ok(keys.every(key=>!seen.has(key)),`refresh ${refreshIndex+1} recycled a track`);
+    assert.equal(refreshed.preserved_previous_mix,false);
+    assert.deepEqual(refreshed.playlist_preview.items.map(item=>item.track_key),keys);
+    keys.forEach(key=>seen.add(key));
+    batches.push(keys);
+  }
+
+  assert.deepEqual(batches.map(batch=>batch.length),[20,20,5,0]);
+  assert.equal(seen.size,candidates.length);
+  assert.deepEqual(batches[3],[]);
+  const finalRefresh=await (await request('/api/recommendations')).json();
+  assert.equal(finalRefresh.count,0);
+  assert.deepEqual(finalRefresh.items,[]);
 });
 
 test('hosted served ledger excludes songs already shown by the local publisher', async () => {

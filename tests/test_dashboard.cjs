@@ -212,7 +212,7 @@ test('Refresh uses a returned fresh batch without waiting on background discover
   assert.equal(vm.runInContext('globalThis.waitCalls', h.context), 0);
 });
 
-test('Refresh waits for provider discovery when the returned batch is partial', async () => {
+test('Refresh shows a partial fresh batch without waiting or recycling an older one', async () => {
   const h = harness();
   vm.runInContext('globalThis.waitCalls = 0; waitForHostedRefresh = async () => { globalThis.waitCalls += 1; return {}; }', h.context);
   const original = h.context.fetch;
@@ -221,5 +221,5 @@ test('Refresh waits for provider discovery when the returned batch is partial', 
     return original(url);
   };
   await vm.runInContext('scan()', h.context);
-  assert.equal(vm.runInContext('globalThis.waitCalls', h.context), 1);
+  assert.equal(vm.runInContext('globalThis.waitCalls', h.context), 0);
 });
