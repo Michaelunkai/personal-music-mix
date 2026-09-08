@@ -197,7 +197,12 @@ async function scan() {
     // time to acknowledge the new batch so Refresh renders newly discovered
     // songs in the same user action, while a fully offline companion returns
     // immediately because waitForHostedRefresh exits when it is not online.
-    const hosted = await waitForHostedRefresh({ timeoutMs: 60000 });
+    // A completed scan already returns a new unseen batch when the durable
+    // cache has candidates. Do not make the user wait for the companion's
+    // next background discovery request in that case; wait the full bounded
+    // window only when this scan returned no fresh items.
+    const hasFreshBatch = Array.isArray(result.recommendations) && result.recommendations.length > 0;
+    const hosted = hasFreshBatch ? null : await waitForHostedRefresh({ timeoutMs: 60000 });
     const hostedPending = Boolean(hosted?.hosted && hosted?.discovery?.pending);
     const bridgeOffline = !bridge?.ok;
     if (bridgeOffline && hostedPending) toast("Refresh requested from saved history; the browser bridge and hosted discovery are still reconnecting.");
