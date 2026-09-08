@@ -328,3 +328,34 @@ def test_cloud_sync_wake_event_publishes_without_waiting_for_poll_interval(tmp_p
     finally:
         stop.set()
         wake.set()
+
+
+def test_cloud_served_ledger_change_rebuilds_local_fresh_cache(tmp_path: Path, monkeypatch):
+    import app.cloud_sync as cloud_sync
+
+    config = tmp_path / "cloud-sync.json"
+    config.write_text("{}", encoding="utf-8")
+    calls = []
+    rebuilds = []
+
+    def fake_publish(database, config_path=None, *, discovery=None):
+        calls.append(time.monotonic())
+        return {"state": "unchanged", "served_keys_merged": 1}
+
+    monkeypatch.setattr(cloud_sync, "publish_library", fake_publish)
+    wake = threading.Event()
+    stop = cloud_sync.start_cloud_sync(
+        object(),
+        on_library_changed=lambda: rebuilds.append(time.monotonic()),
+        config_path=config,
+        wake_event=wake,
+    )
+    try:
+        deadline = time.monotonic() + 2
+        while not rebuilds and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert calls, "The initial cloud sync pass did not start"
+        assert rebuilds, "A newly learned hosted served key did not trigger a local rebuild"
+    finally:
+        stop.set()
+        wake.set()

@@ -34,6 +34,7 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
     config_path = config_path or Path(__file__).resolve().parent.parent / "data" / "cloud-sync.json"
     if not config_path.is_file():
         return {"state": "not_configured"}
+    cloud_served_merged = 0
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
         if Path(config.get("database_path", "")).resolve() != Path(database.path).resolve():
@@ -48,7 +49,10 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
         with urlopen(request, timeout=20) as response:
             favorites = json.load(response)
         merged = database.merge_dashboard_favorites(favorites.get("records", []))
-        database.merge_cloud_served_keys(favorites.get("served_keys", []))
+        # A hosted refresh may have already shown songs that this local
+        # process has not seen. Persist that union before discovery so the
+        # next local recommendation run cannot resurrect those songs.
+        cloud_served_merged = database.merge_cloud_served_keys(favorites.get("served_keys", []))
         if discovery is not None:
             discovery_status = discovery.refresh((favorites.get('discovery_request') or {}).get('id'))
 
@@ -76,7 +80,12 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
         if database.get_metadata("cloud_synced_fingerprint") == fingerprint:
             publish_served_ledger()
             report_discovery()
-            result = {"state": "unchanged", "tracks": len(tracks), "origin": origin}
+            result = {
+                "state": "unchanged",
+                "tracks": len(tracks),
+                "origin": origin,
+                "served_keys_merged": cloud_served_merged,
+            }
             database.set_metadata("cloud_sync_status", json.dumps(result))
             return result
         # Keep one import transaction for a normal library so the hosted
@@ -99,13 +108,26 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
                 result = json.load(response)
             if result.get("status") != "completed":
                 raise RuntimeError("Private site did not confirm the library update")
-        result = {"state": "synced", "tracks": len(tracks), "favorites_merged": merged, "origin": origin}
+        result = {
+            "state": "synced",
+            "tracks": len(tracks),
+            "favorites_merged": merged,
+            "origin": origin,
+            "served_keys_merged": cloud_served_merged,
+        }
         database.set_metadata("cloud_synced_fingerprint", fingerprint)
         publish_served_ledger()
         report_discovery()
     except Exception as exc:
         # Exception messages may contain request details. Persist only the type.
-        result = {"state": "failed", "error": type(exc).__name__}
+        # Keep the merge count even when a later publish step fails. The
+        # caller can still rebuild its local fresh cache around the newly
+        # learned hosted exclusions.
+        result = {
+            "state": "failed",
+            "error": type(exc).__name__,
+            "served_keys_merged": cloud_served_merged,
+        }
     database.set_metadata("cloud_sync_status", json.dumps(result))
     return result
 
@@ -122,7 +144,8 @@ def start_cloud_sync(database, on_library_changed=None, *, config_path: Path | N
     def run():
         while not stop.is_set():
             result = publish_library(database, config, discovery=discovery)
-            if result.get('state') == 'synced' and on_library_changed:
+            ledger_changed = int(result.get('served_keys_merged') or 0) > 0
+            if (result.get('state') == 'synced' or ledger_changed) and on_library_changed:
                 try:
                     on_library_changed()
                 except Exception as exc:

@@ -62,15 +62,20 @@ def test_cloud_sync_pulls_newer_favorites_even_without_local_changes(tmp_path, m
     config=tmp_path/'cloud.json'
     config.write_text(json.dumps({'origin':'https://test.chatgpt.site','database_path':str(db.path),'encrypted_token':'test'}))
     monkeypatch.setattr(cloud_sync,'_unprotect',lambda _: 'test-only')
-    records=[]; imported=[]
+    records=[]; imported=[]; served=['video:bbbbbbbbbbb']
     def urlopen(request, timeout):
         if request.get_method() == 'POST':
             imported.append(json.loads(request.data))
             return io.StringIO('{"status":"completed"}')
-        return io.StringIO(json.dumps({'records':records}))
+        return io.StringIO(json.dumps({'records':records,'served_keys':served}))
     monkeypatch.setattr(cloud_sync,'urlopen',urlopen)
-    assert cloud_sync.publish_library(db,config)['state'] == 'synced'
-    assert cloud_sync.publish_library(db,config)['state'] == 'unchanged'
+    first = cloud_sync.publish_library(db,config)
+    assert first['state'] == 'synced'
+    assert first['served_keys_merged'] == 1
+    assert 'video:bbbbbbbbbbb' in db.recommendation_exclusion_keys()
+    second = cloud_sync.publish_library(db,config)
+    assert second['state'] == 'unchanged'
+    assert second['served_keys_merged'] == 0
     db.execute("UPDATE canonical_tracks SET updated_at='2099-01-01T00:00:00Z',last_seen_at='2099-01-01T00:00:00Z'")
     assert cloud_sync.publish_library(db,config)['state'] == 'unchanged'
     records.append({'track_key':key,'liked':1,'updated_at':'2090-01-01T00:00:00Z'})
