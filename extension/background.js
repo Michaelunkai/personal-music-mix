@@ -1,11 +1,18 @@
 const DEFAULT_ENDPOINT = "http://127.0.0.1:8000/api/browser/sync";
 const HEARTBEAT_ENDPOINT = "http://127.0.0.1:8000/api/browser/heartbeat";
+const HISTORY_PAGE_URL = "https://music.youtube.com/history";
 const HISTORY_URL_PATTERN = "https://music.youtube.com/history*";
 const DASHBOARD_ORIGINS = new Set([
   "https://personal-music-mix.michaelovsky55555.chatgpt.site",
   "http://127.0.0.1:8000",
   "http://localhost:8000",
 ]);
+
+// Dashboard refreshes, alarms, and tab lifecycle events can arrive while the
+// service worker is still handling the previous request. Serialize the
+// discovery/create/sync sequence so two simultaneous refreshes cannot create
+// duplicate background history tabs.
+let historySyncInFlight = null;
 
 function isHistoryUrl(url) {
   try {
@@ -40,14 +47,42 @@ async function requestHistorySync(tabId) {
   }
 }
 
-async function requestHistoryTabsSync() {
+async function findHistoryTabs() {
   const tabs = await chrome.tabs.query({ url: [HISTORY_URL_PATTERN, 'https://music.youtube.com/playlist*'] });
-  const targets = tabs.filter((tab) => isHistoryUrl(tab.url));
-  const results = await Promise.all(targets.map((tab) => requestHistorySync(tab.id)));
-  return {
-    count: targets.length,
-    acknowledged: results.filter((result) => result?.ok).length,
-  };
+  return tabs.filter((tab) => isHistoryUrl(tab.url));
+}
+
+async function ensureHistoryTabs() {
+  const existing = await findHistoryTabs();
+  if (existing.length) return existing;
+  try {
+    // Keep the provider session loaded without stealing the user's focus or
+    // closing/replacing any existing tab. onUpdated will retry once the page
+    // has finished rendering if the initial message arrives too early.
+    const created = await chrome.tabs.create({ url: HISTORY_PAGE_URL, active: false });
+    return created?.id ? [created] : [];
+  } catch (_) {
+    // A temporary tab creation failure is retryable on the next alarm or
+    // dashboard refresh and must not prevent the dashboard from responding.
+    return [];
+  }
+}
+
+async function requestHistoryTabsSync() {
+  if (historySyncInFlight) return historySyncInFlight;
+  historySyncInFlight = (async () => {
+    const targets = await ensureHistoryTabs();
+    const results = await Promise.all(targets.map((tab) => requestHistorySync(tab.id)));
+    return {
+      count: targets.length,
+      acknowledged: results.filter((result) => result?.ok).length,
+    };
+  })();
+  try {
+    return await historySyncInFlight;
+  } finally {
+    historySyncInFlight = null;
+  }
 }
 
 function isDashboardUrl(url) {

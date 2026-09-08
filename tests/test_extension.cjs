@@ -37,7 +37,7 @@ function contentHarness({label='', pressed=null, title='A song', favorites=false
       setInterval() {}, addEventListener() {},
     },
     chrome: { runtime: {
-      getManifest: () => ({ version: '0.1.1' }),
+      getManifest: () => ({ version: '0.1.2' }),
       onMessage: { addListener: fn => listeners.push(fn) },
       sendMessage(message, callback) {
         if (message.type === 'ytmusic-history') messages.push({ message, callback });
@@ -198,4 +198,42 @@ test('background accepts dashboard refresh only from approved origins', async ()
   ));
   assert.equal(denied.ok, false);
   assert.equal(sent.length, 2);
+});
+
+test('background creates one inactive history tab when none is open, including concurrent refreshes', async () => {
+  const listeners = {};
+  const event = name => ({ addListener: fn => { listeners[name] = fn; } });
+  const sent = [];
+  const createdTabs = [];
+  const context = vm.createContext({
+    URL, AbortSignal,
+    fetch: async () => ({ ok: true, json: async () => ({}) }),
+    chrome: {
+      runtime: { onInstalled: event('installed'), onStartup: event('startup'), onMessage: event('message') },
+      alarms: { create() {}, onAlarm: event('alarm') },
+      tabs: {
+        onUpdated: event('updated'),
+        query: async () => [],
+        create: async options => {
+          createdTabs.push(options);
+          return { id: 42, url: options.url, active: options.active };
+        },
+        sendMessage: async (id, message) => { sent.push({ id, message }); },
+      },
+      scripting: { executeScript: async () => {} },
+      storage: { local: { get: async defaults => defaults } },
+      action: { onClicked: event('clicked') },
+    },
+  });
+  vm.runInContext(source('background.js'), context);
+  const refresh = () => new Promise(resolve => listeners.message(
+    { type: 'dashboard-refresh-request', request_id: 'refresh-background-tab' },
+    { url: 'https://personal-music-mix.michaelovsky55555.chatgpt.site/' },
+    resolve,
+  ));
+  const [first, second] = await Promise.all([refresh(), refresh()]);
+  assert.deepEqual(JSON.parse(JSON.stringify(first)), { ok: true, tabs: 1, acknowledged: 1, request_id: 'refresh-background-tab' });
+  assert.deepEqual(JSON.parse(JSON.stringify(second)), { ok: true, tabs: 1, acknowledged: 1, request_id: 'refresh-background-tab' });
+  assert.deepEqual(JSON.parse(JSON.stringify(createdTabs)), [{ url: 'https://music.youtube.com/history', active: false }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [{ id: 42, message: { type: 'sync-now' } }]);
 });

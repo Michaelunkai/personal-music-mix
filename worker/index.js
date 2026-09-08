@@ -45,16 +45,28 @@ async function rebuild(db) {
   const {rows,favorites} = await library(db);
   if (!rows.length) return {status:'failed',run:{message:'No listening history is available yet. Connect the local bridge first.'}};
   const served = await servedKeys(db);
-  const items = rankTracks(rows,favorites,20,Date.now(),{unheardOnly:true,excludeKeys:served});
-  const nextServed = mergeKeys([...served], items.map(item => trackKey(item)).filter(Boolean));
-  const run = {run_id:crypto.randomUUID(),status:'completed',items_seen:rows.length,finished_at:now(),message:items.length
-    ? `Fresh mix built from your most-listened songs and favorites; ${items.length} songs are new to your listening history.`
-    : 'No unseen playable recommendations are available yet. Refresh to request another provider discovery batch.'};
+  const freshItems = rankTracks(rows,favorites,20,Date.now(),{unheardOnly:true,excludeKeys:served});
+  // A provider can legitimately return no new candidates while a previous
+  // batch is still the user's usable mix. Keep that batch visible instead of
+  // replacing it with an empty playlist; the caller still receives an empty
+  // `recommendations` array so the dashboard can continue waiting for the next
+  // discovery request. Only a genuinely new batch is added to the durable
+  // served ledger.
+  const previousRecommendations = await readState(db,'recommendations') || [];
+  const previousFresh = freshItems.length ? [] : await currentFreshItems(db,rows,favorites,previousRecommendations);
+  const visibleItems = freshItems.length ? freshItems : previousFresh;
+  const preservedPrevious = !freshItems.length && previousFresh.length > 0;
+  const nextServed = mergeKeys([...served], freshItems.map(item => trackKey(item)).filter(Boolean));
+  const run = {run_id:crypto.randomUUID(),status:'completed',items_seen:rows.length,finished_at:now(),message:freshItems.length
+    ? `Fresh mix built from your most-listened songs and favorites; ${freshItems.length} songs are new to your listening history.`
+    : preservedPrevious
+      ? `No new unseen songs arrived; your current ${previousFresh.length}-song mix stays available while the provider tries again.`
+      : 'No unseen playable recommendations are available yet. Refresh to request another provider discovery batch.'};
   const previous = await readState(db,'runs') || [];
   const oldPlan = await readState(db,'playlist');
-  const plan = {name:oldPlan?.name || 'Your personal mix',status:'preview',requested_count:items.length,items:items.map(row=>row.track),generated_at:now()};
-  await db.batch([saveState(db,'recommendations',items),saveState(db,'playlist',plan),saveState(db,'recommendation_history',nextServed),saveState(db,'runs',[run,...previous].slice(0,20))]);
-  return {status:'completed',run,recommendations:items,playlist_preview:plan};
+  const plan = {name:oldPlan?.name || 'Your personal mix',status:'preview',requested_count:visibleItems.length,items:visibleItems.map(row=>row.track || row),generated_at:freshItems.length ? now() : (oldPlan?.generated_at || now())};
+  await db.batch([saveState(db,'recommendations',visibleItems),saveState(db,'playlist',plan),saveState(db,'recommendation_history',nextServed),saveState(db,'runs',[run,...previous].slice(0,20))]);
+  return {status:'completed',run,recommendations:freshItems,playlist_preview:plan,preserved_previous_mix:preservedPrevious};
 }
 
 async function handleApi(request,env,path) {

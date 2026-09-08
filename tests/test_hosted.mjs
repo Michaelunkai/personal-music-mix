@@ -155,13 +155,54 @@ test('fresh dashboard mode only returns unseen playable discoveries and consumes
   const first=await (await request('/api/recommendations')).json();
   assert.deepEqual(first.items.map(item=>item.track.track_key),['new-one','new-two']);
   assert.ok(first.items.every(item=>item.track.play_count===0 && item.reasons.some(reason=>reason.includes('listen to Most Played often'))));
-  await request('/api/scan',{});
-  assert.equal((await (await request('/api/recommendations')).json()).count,0);
+  const exhausted=await (await request('/api/scan',{})).json();
+  assert.deepEqual(exhausted.recommendations,[]);
+  assert.equal(exhausted.preserved_previous_mix,true);
+  assert.equal((await (await request('/api/recommendations')).json()).count,2);
   await request('/api/sync/import',{tracks:[candidate('new-three','ddddddddddd')]});
   const second=await (await request('/api/recommendations')).json();
   assert.deepEqual(second.items.map(item=>item.track.track_key),['new-three']);
   const firstKeys=new Set(first.items.map(item=>item.track.track_key));
   assert.ok(second.items.every(item=>!firstKeys.has(item.track.track_key)));
+});
+
+test('refresh preserves the current fresh 20-song mix when no new candidates arrive', async () => {
+  const env={DB:database()};
+  const request=(path,body)=>worker.fetch(new Request(`https://preserve.chatgpt.site${path}`,{
+    ...(body===undefined?{}:{method:'POST',body:JSON.stringify(body)}),
+    headers:{'Content-Type':'application/json','X-Mix-Mode':'fresh'},
+  }),env);
+  const expiry=Date.now()/1000+3600;
+  const seed={track_key:'preserve-seed',title:'Most Played Seed',artist:'Signal Artist',video_id:'aaaaaaaaaaa',play_count:50,liked_count:0};
+  const candidates=Array.from({length:20},(_,index)=>({
+    track_key:`preserve-${index}`,
+    title:`Fresh Candidate ${index}`,
+    artist:`Discovery Artist ${index%2}`,
+    video_id:String(index).padStart(11,'0'),
+    play_count:0,
+    liked_count:0,
+    source:'favorite_discovery',
+    discovery_seeds:[{track_key:seed.track_key,title:seed.title,seed_kind:'most_listened',play_count:seed.play_count,liked:false,expires_at:expiry}],
+  }));
+  const imported=await (await request('/api/sync/import',{tracks:[seed,...candidates]})).json();
+  assert.equal(imported.status,'completed');
+  assert.equal(imported.recommendations.length,20);
+  const firstKeys=new Set(imported.recommendations.map(item=>item.track.track_key));
+  assert.equal(firstKeys.size,20);
+
+  const refreshed=await (await request('/api/scan',{})).json();
+  assert.deepEqual(refreshed.recommendations,[]);
+  assert.equal(refreshed.preserved_previous_mix,true);
+  assert.equal(refreshed.playlist_preview.requested_count,20);
+  assert.deepEqual(new Set(refreshed.playlist_preview.items.map(item=>item.track_key)),firstKeys);
+  assert.match(refreshed.run.message,/No new unseen songs arrived; your current 20-song mix stays available/);
+
+  const recommendations=await (await request('/api/recommendations')).json();
+  assert.equal(recommendations.count,20);
+  assert.deepEqual(new Set(recommendations.items.map(item=>item.track.track_key)),firstKeys);
+  const latest=await (await request('/api/playlists/latest')).json();
+  assert.equal(latest.plan.requested_count,20);
+  assert.deepEqual(new Set(latest.plan.items.map(item=>item.track_key)),firstKeys);
 });
 
 test('hosted served ledger excludes songs already shown by the local publisher', async () => {

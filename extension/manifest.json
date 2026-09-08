@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Music Personal Mix Bridge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Sends rendered YouTube Music history rows to the local personal mix app without reading cookies or passwords.",
   "permissions": ["storage", "alarms", "tabs", "scripting"],
   "host_permissions": ["https://music.youtube.com/*", "https://personal-music-mix.michaelovsky55555.chatgpt.site/*", "http://127.0.0.1:8000/*", "http://localhost:8000/*"],
