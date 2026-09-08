@@ -910,7 +910,42 @@ class Database:
                JOIN recommendation_runs r ON r.run_id = i.run_id
                WHERE r.status = 'completed' AND i.track_key IS NOT NULL"""
         )
-        return {str(row['track_key']) for row in rows if row['track_key']}
+        keys = {str(row['track_key']) for row in rows if row['track_key']}
+        # The hosted site has its own durable served-song ledger.  Pulling
+        # that ledger into the local exclusion set keeps discovery from
+        # replenishing candidates that the hosted dashboard has already
+        # shown, even when the library fingerprint itself did not change.
+        try:
+            remote = json.loads(self.get_metadata("cloud_served_keys") or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            remote = []
+        if isinstance(remote, list):
+            keys.update(str(value) for value in remote if isinstance(value, str) and value)
+        return keys
+
+    def merge_cloud_served_keys(self, values: Any) -> int:
+        """Persist hosted served-song keys without replacing local evidence."""
+
+        incoming = {
+            str(value).strip()
+            for value in (values if isinstance(values, (list, tuple, set)) else [])
+            if isinstance(value, str) and str(value).strip()
+        }
+        if not incoming:
+            return 0
+        try:
+            current = json.loads(self.get_metadata("cloud_served_keys") or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            current = []
+        existing = {
+            str(value).strip()
+            for value in (current if isinstance(current, list) else [])
+            if isinstance(value, str) and str(value).strip()
+        }
+        merged = existing | incoming
+        if merged != existing:
+            self.set_metadata("cloud_served_keys", json.dumps(sorted(merged), separators=(",", ":")))
+        return len(merged - existing)
 
     def overview(self) -> dict[str, Any]:
         stats = self.list_track_stats(limit=50_000)

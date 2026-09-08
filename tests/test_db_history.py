@@ -25,6 +25,14 @@ def test_database_health_is_safe(tmp_path: Path):
     assert health["tracks"] == 0
 
 
+def test_cloud_served_ledger_is_unioned_with_local_recommendation_evidence(tmp_path: Path):
+    db = Database(tmp_path / "ledger.sqlite3")
+    db.initialize()
+    assert db.merge_cloud_served_keys(["video:aaaaaaaaaaa", "video:bbbbbbbbbbb"]) == 2
+    assert db.merge_cloud_served_keys(["video:aaaaaaaaaaa", "video:ccccccccccc"]) == 1
+    assert {"video:aaaaaaaaaaa", "video:bbbbbbbbbbb", "video:ccccccccccc"}.issubset(db.recommendation_exclusion_keys())
+
+
 def test_current_unlike_overrides_historical_like_and_cloud_choices_merge_by_time(tmp_path):
     db=Database(tmp_path / 'preferences.sqlite3'); db.initialize()
     HistoryService(db).ingest([{'title':'Song','artist':'Artist','video_id':'aaaaaaaaaaa','liked':True,'played_at':'2026-01-01T00:00:00Z'}])
@@ -67,7 +75,8 @@ def test_cloud_sync_pulls_newer_favorites_even_without_local_changes(tmp_path, m
     assert cloud_sync.publish_library(db,config)['state'] == 'unchanged'
     records.append({'track_key':key,'liked':1,'updated_at':'2090-01-01T00:00:00Z'})
     assert cloud_sync.publish_library(db,config)['state'] == 'synced'
-    assert imported[-1]['tracks'][0]['local_favorite'] == 1
+    synced_payload = next(payload for payload in reversed(imported) if 'tracks' in payload)
+    assert synced_payload['tracks'][0]['local_favorite'] == 1
     assert cloud_sync.publish_library(db,config)['state'] == 'unchanged'
     config.write_text(json.dumps({'origin':'https://other.chatgpt.site','database_path':str(db.path),'encrypted_token':'test'}))
     assert cloud_sync.publish_library(db,config)['state'] == 'synced'

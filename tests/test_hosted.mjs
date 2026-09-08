@@ -164,6 +164,22 @@ test('fresh dashboard mode only returns unseen playable discoveries and consumes
   assert.ok(second.items.every(item=>!firstKeys.has(item.track.track_key)));
 });
 
+test('hosted served ledger excludes songs already shown by the local publisher', async () => {
+  const env={DB:database()};
+  const request=(path,body)=>worker.fetch(new Request(`https://ledger.chatgpt.site${path}`,{
+    ...(body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),
+    headers:{'Content-Type':'application/json','X-Mix-Mode':'fresh'},
+  }),env);
+  const expiry=Date.now()/1000+3600;
+  const seed={track_key:'ledger-seed',title:'Most Played',artist:'A',video_id:'aaaaaaaaaaa',play_count:20,liked_count:0};
+  const candidate=(key,id)=>({track_key:key,title:key,artist:'B',video_id:id,play_count:0,liked_count:0,source:'favorite_discovery',discovery_seeds:[{track_key:seed.track_key,title:seed.title,seed_kind:'most_listened',play_count:20,liked:false,expires_at:expiry}]});
+  await request('/api/sync/import',{tracks:[seed,candidate('already-local','bbbbbbbbbbb'),candidate('still-fresh','ccccccccccc')],defer_rebuild:true});
+  const ledger=await (await request('/api/sync/ledger',{served_keys:['already-local']})).json();
+  assert.equal(ledger.status,'completed');
+  const rebuilt=await (await request('/api/sync/import',{tracks:[seed,candidate('already-local','bbbbbbbbbbb'),candidate('still-fresh','ccccccccccc')]})).json();
+  assert.deepEqual(rebuilt.recommendations.map(item=>item.track.track_key),['still-fresh']);
+});
+
 test('fresh recommendations prioritize explicit favorite seeds', async () => {
   const env={DB:database()};
   const request=(path,body)=>worker.fetch(new Request(`https://favorite.chatgpt.site${path}`,{

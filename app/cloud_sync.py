@@ -48,8 +48,22 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
         with urlopen(request, timeout=20) as response:
             favorites = json.load(response)
         merged = database.merge_dashboard_favorites(favorites.get("records", []))
+        database.merge_cloud_served_keys(favorites.get("served_keys", []))
         if discovery is not None:
             discovery_status = discovery.refresh((favorites.get('discovery_request') or {}).get('id'))
+
+        def publish_served_ledger():
+            keys = sorted(database.recommendation_exclusion_keys())
+            ledger_request = Request(
+                origin.rstrip("/") + "/api/sync/ledger",
+                data=json.dumps({"served_keys": keys}).encode("utf-8"),
+                headers={"Content-Type": "application/json", "OAI-Sites-Authorization": "Bearer " + token},
+                method="POST",
+            )
+            with urlopen(ledger_request, timeout=20) as response:
+                result = json.load(response)
+            if result.get("status") not in {"completed", "ok", "unchanged"}:
+                raise RuntimeError("Private site did not confirm the served-song ledger")
         def report_discovery():
             if discovery is None:
                 return
@@ -60,6 +74,7 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
         tracks = [{key:row.get(key) for key in published_fields} for row in database.list_track_stats(limit=10000)]
         fingerprint = hashlib.sha256(json.dumps({"origin":origin.rstrip("/"),"tracks":tracks}, sort_keys=True).encode()).hexdigest()
         if database.get_metadata("cloud_synced_fingerprint") == fingerprint:
+            publish_served_ledger()
             report_discovery()
             result = {"state": "unchanged", "tracks": len(tracks), "origin": origin}
             database.set_metadata("cloud_sync_status", json.dumps(result))
@@ -86,6 +101,7 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
                 raise RuntimeError("Private site did not confirm the library update")
         result = {"state": "synced", "tracks": len(tracks), "favorites_merged": merged, "origin": origin}
         database.set_metadata("cloud_synced_fingerprint", fingerprint)
+        publish_served_ledger()
         report_discovery()
     except Exception as exc:
         # Exception messages may contain request details. Persist only the type.

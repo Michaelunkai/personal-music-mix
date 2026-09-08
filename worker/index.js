@@ -9,6 +9,8 @@ const readState = async (db,key) => { const row = await db.prepare('SELECT paylo
 const saveState = (db,key,value) => db.prepare('INSERT INTO music_state(key,payload) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload').bind(key,JSON.stringify(value));
 const requestDiscovery = db => saveState(db,'discovery_request',{id:crypto.randomUUID(),requested_at:now()}).run();
 const asKeys = value => new Set(Array.isArray(value) ? value.filter(key => typeof key === 'string' && key) : []);
+const MAX_LEDGER_KEYS = 100000;
+const mergeKeys = (current, incoming) => [...new Set([...current, ...incoming])].slice(0, MAX_LEDGER_KEYS);
 const trackKey = item => String(item?.track?.track_key || item?.track_key || '');
 const activeItem = (item, rowsByKey, favorites, nowMs = Date.now()) => {
   const track = item?.track || item || {};
@@ -20,7 +22,12 @@ const activeItem = (item, rowsByKey, favorites, nowMs = Date.now()) => {
   const seeds = Array.isArray(row.discovery_seeds) ? row.discovery_seeds : [];
   return freshSource && !played && !liked && playable && seeds.some(seed => Number(seed.expires_at) * 1000 > nowMs);
 };
-async function servedKeys(db) { return asKeys(await readState(db, 'recommendation_history')); }
+async function servedKeys(db) {
+  return new Set([
+    ...asKeys(await readState(db, 'recommendation_history')),
+    ...asKeys(await readState(db, 'local_served_keys')),
+  ]);
+}
 async function currentFreshItems(db, rows, favorites, fallback = []) {
   const rowsByKey = new Map(rows.map(row => [row.track_key, row]));
   return (Array.isArray(fallback) ? fallback : []).filter(item => activeItem(item, rowsByKey, favorites));
@@ -39,7 +46,7 @@ async function rebuild(db) {
   if (!rows.length) return {status:'failed',run:{message:'No listening history is available yet. Connect the local bridge first.'}};
   const served = await servedKeys(db);
   const items = rankTracks(rows,favorites,20,Date.now(),{unheardOnly:true,excludeKeys:served});
-  const nextServed = [...served, ...items.map(item => trackKey(item)).filter(Boolean)];
+  const nextServed = mergeKeys([...served], items.map(item => trackKey(item)).filter(Boolean));
   const run = {run_id:crypto.randomUUID(),status:'completed',items_seen:rows.length,finished_at:now(),message:items.length
     ? `Fresh mix built from your most-listened songs and favorites; ${items.length} songs are new to your listening history.`
     : 'No unseen playable recommendations are available yet. Refresh to request another provider discovery batch.'};
@@ -74,6 +81,14 @@ async function handleApi(request,env,path) {
       checked_at:Number.isFinite(Date.parse(discovery.checked_at)) ? discovery.checked_at : null,
       request_id:typeof discovery.request_id === 'string' ? discovery.request_id.slice(0,100) : null}}).run();
     return json({received:true});
+  }
+  if(path === '/api/sync/ledger' && method === 'POST') {
+    const payload = await body();
+    if(!Array.isArray(payload.served_keys) || payload.served_keys.length > MAX_LEDGER_KEYS) return json({detail:'A bounded served_keys array is required'},422);
+    const current = await servedKeys(db);
+    const merged = mergeKeys([...current], [...asKeys(payload.served_keys)]);
+    await saveState(db,'local_served_keys',merged).run();
+    return json({status:'completed',served_keys:merged.length});
   }
   if (path === '/api/sync/import' && method === 'POST') {
     const payload = await body(); const tracks = normalizeImport(payload);
@@ -134,7 +149,7 @@ async function handleApi(request,env,path) {
     return json({available:!!plan,plan,write_enabled:false});
   }
   if(path === '/api/runs') return json({items:await readState(db,'runs') || []});
-  if(path === '/api/favorites') { const {results:records} = await db.prepare('SELECT track_key,liked,updated_at FROM music_favorites').all(); return json({track_keys:records.filter(row=>row.liked).map(row=>row.track_key),records,source:'dashboard',discovery_request:await readState(db,'discovery_request')}); }
+  if(path === '/api/favorites') { const {results:records} = await db.prepare('SELECT track_key,liked,updated_at FROM music_favorites').all(); return json({track_keys:records.filter(row=>row.liked).map(row=>row.track_key),records,source:'dashboard',discovery_request:await readState(db,'discovery_request'),served_keys:[...await servedKeys(db)]}); }
   if(path === '/api/status') return json({scheduler_running:false,scheduler_mode:'browser_bridge_event_driven',scheduler_healthy:true});
   const {rows,favorites} = await library(db);
   const plays = rows.reduce((sum,row)=>sum+row.play_count,0);
