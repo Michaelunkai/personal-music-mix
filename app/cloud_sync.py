@@ -69,7 +69,16 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
         # is present.  The bound still protects the request body on unusually
         # large histories.
         for offset in range(0, len(tracks), 500):
-            body = json.dumps({"tracks": tracks[offset:offset+500], "last_sync_at": database.get_metadata("browser_bridge_last_sync")}).encode("utf-8")
+            chunk = tracks[offset:offset+500]
+            body = json.dumps({
+                "tracks": chunk,
+                "last_sync_at": database.get_metadata("browser_bridge_last_sync"),
+                # The hosted worker rebuilds only after the final chunk.  A
+                # rebuild per chunk can make the last response replace a
+                # healthy fresh mix with an empty one when its chunk has no
+                # active seed rows.
+                "defer_rebuild": offset + len(chunk) < len(tracks),
+            }).encode("utf-8")
             request = Request(origin.rstrip("/") + "/api/sync/import", data=body, headers={"Content-Type": "application/json", "OAI-Sites-Authorization": "Bearer " + token}, method="POST")
             with urlopen(request, timeout=20) as response:
                 result = json.load(response)

@@ -114,6 +114,22 @@ test('hosted refresh queues discovery and only acknowledged delivery clears pend
   assert.equal((await (await call('/api/playlists/latest')).json()).plan.requested_count,1);
 });
 
+test('chunked hosted imports rebuild once after the final chunk', async()=>{
+  const env={DB:database()};
+  const call=(path,body)=>worker.fetch(new Request(`https://chunks.chatgpt.site${path}`,body===undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),env);
+  const seed={track_key:'seed',title:'Most Played',artist:'A',video_id:'a'.repeat(11),play_count:20,liked_count:0};
+  const candidate={track_key:'candidate',title:'Fresh Candidate',artist:'B',video_id:'b'.repeat(11),play_count:0,liked_count:0,source:'favorite_discovery',discovery_seeds:[{track_key:'seed',title:'Most Played',seed_kind:'most_listened',play_count:20,liked:false,expires_at:Date.now()/1000+3600}]};
+  const first=await (await call('/api/sync/import',{tracks:[seed],defer_rebuild:true})).json();
+  assert.equal(first.status,'completed');
+  assert.equal(first.rebuild_deferred,true);
+  assert.equal((await (await call('/api/recommendations?unheard_only=1')).json()).count,0);
+  const final=await (await call('/api/sync/import',{tracks:[candidate],defer_rebuild:false})).json();
+  assert.equal(final.status,'completed');
+  const fresh=await (await call('/api/recommendations?unheard_only=1')).json();
+  assert.deepEqual(fresh.items.map(item=>item.track.track_key),['candidate']);
+  assert.equal((await (await call('/api/playlists/latest?unheard_only=1')).json()).plan.requested_count,1);
+});
+
 test('favorite artists influence other library songs and zero-play favorites are valid', async () => {
   const {rankTracks}=await import('../worker/domain.js');
   const rows=[{track_key:'a',title:'Favorite',artist:'A',play_count:0,liked_count:0},{track_key:'b',title:'Another A',artist:'A',play_count:1,liked_count:0},{track_key:'c',title:'Another C',artist:'C',play_count:1,liked_count:0}];

@@ -84,6 +84,12 @@ async function handleApi(request,env,path) {
     ]);
     // Each chunk and its receipt are committed together; retries are idempotent.
     await db.batch([...statements,saveState(db,'sync',{received_at:now(),source_sync_at:payload.last_sync_at || null,tracks:tracks.length,source:'local_browser_bridge'})]);
+    // A large local library arrives in bounded chunks.  Rebuilding after an
+    // intermediate chunk can consume or hide the fresh pool before the
+    // remaining rows (including its seeds) arrive, leaving the final visible
+    // mix empty.  The publisher marks every non-final chunk explicitly so the
+    // complete library is present before the one authoritative rebuild.
+    if (payload.defer_rebuild === true) return json({status:'completed',imported:tracks.length,rebuild_deferred:true});
     return json({...(await rebuild(db)),imported:tracks.length});
   }
   if (path === '/api/favorites' && method === 'POST') {
