@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -296,3 +298,33 @@ def test_cached_history_does_not_claim_a_live_account_connection(tmp_path: Path)
         signed_out = client.get("/api/connection").json()
         assert signed_out["state"] == "awaiting_account_authentication"
         assert signed_out["browser_bridge"]["ready"] is False
+
+
+def test_cloud_sync_wake_event_publishes_without_waiting_for_poll_interval(tmp_path: Path, monkeypatch):
+    import app.cloud_sync as cloud_sync
+
+    config = tmp_path / "cloud-sync.json"
+    config.write_text("{}", encoding="utf-8")
+    calls = []
+
+    def fake_publish(database, config_path=None, *, discovery=None):
+        calls.append(time.monotonic())
+        return {"state": "unchanged"}
+
+    monkeypatch.setattr(cloud_sync, "publish_library", fake_publish)
+    wake = threading.Event()
+    stop = cloud_sync.start_cloud_sync(object(), config_path=config, wake_event=wake)
+    try:
+        deadline = time.monotonic() + 2
+        while len(calls) < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert calls, "The initial cloud sync pass did not start"
+        initial_calls = len(calls)
+        wake.set()
+        deadline = time.monotonic() + 2
+        while len(calls) <= initial_calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(calls) > initial_calls, "A bridge wake did not trigger an immediate publish pass"
+    finally:
+        stop.set()
+        wake.set()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -80,13 +81,20 @@ def create_app(settings: Settings | None = None):
     def _startup() -> None:
         manager.start_scheduler()
         from .cloud_sync import start_cloud_sync
-        app.state.cloud_sync_stop = start_cloud_sync(database, on_library_changed=manager.rebuild_from_local_history)
+        app.state.cloud_sync_wake = threading.Event()
+        app.state.cloud_sync_stop = start_cloud_sync(
+            database,
+            on_library_changed=manager.rebuild_from_local_history,
+            wake_event=app.state.cloud_sync_wake,
+        )
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
         manager.stop_scheduler()
         if hasattr(app.state, "cloud_sync_stop"):
             app.state.cloud_sync_stop.set()
+        if hasattr(app.state, "cloud_sync_wake"):
+            app.state.cloud_sync_wake.set()
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
@@ -155,6 +163,8 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(status_code=404, detail="Track was not found in your local library")
         database.set_like(track_id=row["track_id"], liked=liked, profile_id="dashboard", source="dashboard")
         rebuilt = manager.rebuild_from_local_history()
+        if hasattr(app.state, "cloud_sync_wake"):
+            app.state.cloud_sync_wake.set()
         return {"saved": True, "liked": liked, "track_key": key, "mix_status": rebuilt.get("status"), "source": "dashboard"}
 
     @app.get("/api/connectors")
@@ -245,6 +255,8 @@ def create_app(settings: Settings | None = None):
             code = str(connector.get("code") or (result.get("run") or {}).get("error_code") or "bridge_failed")
             status_code = 422 if code.startswith("invalid_") else 503
             raise HTTPException(status_code=status_code, detail=(result.get("run") or {}).get("message") or connector.get("message") or "Browser bridge sync failed")
+        if hasattr(app.state, "cloud_sync_wake"):
+            app.state.cloud_sync_wake.set()
         return result
 
     @app.post("/api/browser/heartbeat")

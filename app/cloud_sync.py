@@ -94,9 +94,10 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
     return result
 
 
-def start_cloud_sync(database, on_library_changed=None):
-    config = Path(__file__).resolve().parent.parent / "data" / "cloud-sync.json"
+def start_cloud_sync(database, on_library_changed=None, *, config_path: Path | None = None, wake_event: threading.Event | None = None):
+    config = config_path or (Path(__file__).resolve().parent.parent / "data" / "cloud-sync.json")
     stop = threading.Event()
+    wake = wake_event or threading.Event()
     if not config.is_file():
         return stop
     from .discovery import FavoriteDiscovery
@@ -110,7 +111,9 @@ def start_cloud_sync(database, on_library_changed=None):
                     on_library_changed()
                 except Exception as exc:
                     database.set_metadata('cloud_local_rebuild_error',type(exc).__name__)
-            if stop.wait(30):
+            wake.wait(30)
+            wake.clear()
+            if stop.is_set():
                 break
 
     threading.Thread(target=run, name="private-music-sync", daemon=True).start()
