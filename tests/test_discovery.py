@@ -156,3 +156,96 @@ def test_local_mix_keeps_discovery_beyond_history_scan_limit(tmp_path):
         manager=ScanManager(settings,db)
         assert manager.rebuild_from_local_history()['status']=='completed'
         assert any(item['source']=='favorite_discovery' for item in db.latest_recommendations())
+
+
+class ExpandingProvider:
+    """Deterministic provider fixture with a two-hop related-song frontier."""
+
+    def __init__(self):
+        self.calls = []
+        self.graph = {
+            'a' * 11: tuple(track(letter) for letter in 'bc'),
+            'b' * 11: tuple(track(letter) for letter in 'de'),
+            'c' * 11: tuple(track(letter) for letter in 'fg'),
+            'd' * 11: tuple(track(letter) for letter in 'hi'),
+            'e' * 11: tuple(track(letter) for letter in 'jk'),
+            'f' * 11: tuple(track(letter) for letter in 'lm'),
+            'g' * 11: tuple(track(letter) for letter in 'no'),
+        }
+
+    def related(self, video_id, limit):
+        self.calls.append(video_id)
+        return ConnectorResult(status='ok', items=self.graph.get(video_id, ()))
+
+
+def test_refresh_expands_provider_frontier_after_cached_batch_is_served():
+    with Database() as db:
+        seed = track('a', 'Most Played')
+        db.upsert_track(seed)
+        db.record_history_event(seed.video_id, source_event_id='played-a', title=seed.title, artist=seed.artist)
+        provider = ExpandingProvider()
+        service = FavoriteDiscovery(db, provider)
+
+        first = service.refresh()
+        assert first['candidate_count'] == 2
+        assert provider.calls == ['a' * 11]
+
+        # A new request acknowledges the first batch; the durable ledger marks
+        # both rows as served so the next request has to walk the frontier.
+        service.refresh('request-one')
+        first_batch = RecommendationEngine().recommend(
+            db.list_track_stats(limit=10000),
+            limit=2,
+            exclude_keys=db.recommendation_exclusion_keys(),
+            only_unheard=True,
+        )
+        db.save_recommendations('run-one', first_batch)
+        assert {item.track.track_key for item in first_batch} == {'video:' + 'b' * 11, 'video:' + 'c' * 11}
+
+        second = service.refresh('request-two')
+        assert second['expanded_count'] > 0
+        second_batch = RecommendationEngine().recommend(
+            db.list_track_stats(limit=10000),
+            limit=4,
+            exclude_keys=db.recommendation_exclusion_keys(),
+            only_unheard=True,
+        )
+        assert {item.track.track_key for item in second_batch} == {
+            'video:' + letter * 11 for letter in 'defg'
+        }
+        assert not ({item.track.track_key for item in first_batch} & {item.track.track_key for item in second_batch})
+        assert all('new to your listening history' in item.reasons for item in second_batch)
+
+
+class SearchProvider(ExpandingProvider):
+    def search(self, query, limit):
+        self.calls.append('search:' + query)
+        return ConnectorResult(status='ok', items=(track('p', 'Search discovery'),))
+
+
+def test_refresh_uses_rotated_public_search_when_frontier_is_exhausted():
+    with Database() as db:
+        seed = track('a', 'Most Played')
+        db.upsert_track(seed)
+        db.record_history_event(seed.video_id, source_event_id='played-a', title=seed.title, artist=seed.artist)
+        provider = SearchProvider()
+        service = FavoriteDiscovery(db, provider)
+        service.refresh()
+        service.refresh('request-one')
+        first = RecommendationEngine().recommend(
+            db.list_track_stats(limit=10000),
+            limit=2,
+            exclude_keys=db.recommendation_exclusion_keys(),
+            only_unheard=True,
+        )
+        db.save_recommendations('run-one', first)
+        status = service.refresh('request-two')
+        assert status['search_count'] == 1
+        assert any(call.startswith('search:') for call in provider.calls)
+        fresh = RecommendationEngine().recommend(
+            db.list_track_stats(limit=10000),
+            limit=20,
+            exclude_keys=db.recommendation_exclusion_keys(),
+            only_unheard=True,
+        )
+        assert any(item.track.track_key == 'video:' + 'p' * 11 for item in fresh)

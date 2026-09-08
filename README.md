@@ -22,12 +22,13 @@ Favorites now synchronize in both directions. New explicit choices advance past
 the stored preference timestamp, so clock differences and older retries cannot
 undo a website change. The discovery seeds are the songs with the strongest
 observed play counts, with imported and dashboard favorites added as preference
-signals. Refresh queues a bounded public related-song request from those seeds.
-The local app checks that request every 30 seconds, queries up to three rotating
-seeds with up to 25 candidates each, and publishes the result. The hosted site
-keeps a durable served-song ledger and its For you mix contains only playable
-songs with zero observed plays and no like signal; history rows are never shown
-as recommendations. A completed refresh consumes its songs, so the next refresh
+signals. Refresh queues bounded public related-song and search requests from
+those seeds. The local app checks that request every 30 seconds, queries up to
+eight rotating roots, and then expands a durable two-hop frontier when the
+current unseen batch has been consumed. The hosted site keeps a durable
+served-song ledger and its For you mix contains only playable songs with zero
+observed plays and no like signal; history rows are never shown as
+recommendations. A completed refresh consumes its songs, so the next refresh
 cannot repeat them. Suggestions expire after six hours; failed requests retry
 after five minutes. No account credentials are needed for public discovery, and
 no plays or favorites are invented. If the provider has no unseen candidates,
@@ -41,8 +42,11 @@ favorite. Untimestamped history counts are conservative observed minimums.
 An explicitly observed unselected Like control clears that provider preference;
 missing or conflicting controls preserve the last known choice. Dashboard hearts
 remain separate from these provider preferences.
-Live activation of the revised bridge and real embedded playback remain awaiting
-the approved browser runtime; passing simulated-player tests is not audio proof.
+The live owner route has been verified in approved Chrome Profile 2 / Person 1:
+recommended rows loaded, Refresh mix replaced the batch, and Play changed the
+embedded YouTube player to the selected recommendation with visible playback
+controls. Automatic history updates still require the application bridge to be
+installed and connected in that profile.
 
 This project is a local-first recommendation dashboard for an authenticated YouTube Music account. It learns from rendered YouTube Music history and liked signals, stores a private local SQLite model, ranks songs with an explainable deterministic scorer, and previews a playlist before any provider-side write.
 
