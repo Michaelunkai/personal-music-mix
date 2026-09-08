@@ -229,8 +229,16 @@ def create_app(settings: Settings | None = None):
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail="limit must be an integer") from exc
         if not settings.chrome_cdp_url and not settings.ytmusicapi_headers_path and database.health().get("tracks", 0):
-            return manager.rebuild_from_local_history()
-        return manager.run_now(limit=parsed_limit, include_related=include_related)
+            result = manager.rebuild_from_local_history()
+        else:
+            result = manager.run_now(limit=parsed_limit, include_related=include_related)
+        # A dashboard refresh can rebuild local discovery candidates even when
+        # the authenticated browser bridge is unavailable. Wake the publisher
+        # immediately so the hosted mix receives that new snapshot instead of
+        # waiting for the normal polling interval.
+        if hasattr(app.state, "cloud_sync_wake"):
+            app.state.cloud_sync_wake.set()
+        return result
 
     @app.post("/api/browser/sync")
     async def browser_sync(request: Request) -> dict[str, Any]:

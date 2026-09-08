@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 import pytest
@@ -116,3 +117,24 @@ def test_favorites_refresh_ranking_persist_and_preserve_provider_likes(tmp_path)
         overview = client.get("/api/overview").json()
         assert overview["local_favorite_count"] == 0
         assert overview["provider_liked_track_count"] == 1
+
+
+def test_scan_wakes_cloud_publisher_after_dashboard_refresh(tmp_path: Path):
+    from fastapi.testclient import TestClient
+    from app.api import create_app
+
+    settings = Settings(database_path=tmp_path / "wake.sqlite3", scheduler_interval_seconds=0)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        seed = {
+            "page": "https://music.youtube.com/history",
+            "items": [{"title": "Seed", "artist": "Artist", "url": "https://music.youtube.com/watch?v=seedseed123"}],
+        }
+        assert client.post("/api/browser/sync", json=seed).status_code == 200
+        # Isolate the route assertion from the background publisher's normal
+        # wait/clear cycle while keeping the same application state contract.
+        wake = threading.Event()
+        app.state.cloud_sync_wake = wake
+        response = client.post("/api/scan", json={"include_related": False})
+        assert response.status_code == 200
+        assert wake.is_set()
