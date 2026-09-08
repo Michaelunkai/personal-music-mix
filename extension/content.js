@@ -1,6 +1,23 @@
 (function () {
   if (globalThis.__ytmusicPersonalMixBridgeLoaded) return;
   globalThis.__ytmusicPersonalMixBridgeLoaded = true;
+
+  const DASHBOARD_ORIGINS = new Set([
+    "https://personal-music-mix.michaelovsky55555.chatgpt.site",
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+  ]);
+  if (DASHBOARD_ORIGINS.has(location.origin)) {
+    // The dashboard cannot reach the extension service worker directly. A
+    // same-origin page message gives its Refresh button an immediate signal
+    // while keeping the bridge's account-reading code on YouTube Music only.
+    window.addEventListener("message", (event) => {
+      if (event.source !== window || event.origin !== location.origin || event.data?.type !== "ytmusic-personal-mix-refresh") return;
+      chrome.runtime.sendMessage({ type: "dashboard-refresh-request", requested_at: event.data.requested_at || new Date().toISOString() }).catch(() => {});
+    });
+    return;
+  }
+
   const LIMIT = 500;
   let timer = null;
   let lastFingerprint = "";

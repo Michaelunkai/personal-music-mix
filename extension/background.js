@@ -1,6 +1,11 @@
 const DEFAULT_ENDPOINT = "http://127.0.0.1:8000/api/browser/sync";
 const HEARTBEAT_ENDPOINT = "http://127.0.0.1:8000/api/browser/heartbeat";
 const HISTORY_URL_PATTERN = "https://music.youtube.com/history*";
+const DASHBOARD_ORIGINS = new Set([
+  "https://personal-music-mix.michaelovsky55555.chatgpt.site",
+  "http://127.0.0.1:8000",
+  "http://localhost:8000",
+]);
 
 function isHistoryUrl(url) {
   try {
@@ -29,7 +34,13 @@ async function requestHistorySync(tabId) {
 
 async function requestHistoryTabsSync() {
   const tabs = await chrome.tabs.query({ url: [HISTORY_URL_PATTERN, 'https://music.youtube.com/playlist*'] });
-  await Promise.all(tabs.filter((tab) => isHistoryUrl(tab.url)).map((tab) => requestHistorySync(tab.id)));
+  const targets = tabs.filter((tab) => isHistoryUrl(tab.url));
+  await Promise.all(targets.map((tab) => requestHistorySync(tab.id)));
+  return targets.length;
+}
+
+function isDashboardUrl(url) {
+  try { return DASHBOARD_ORIGINS.has(new URL(url || "").origin); } catch (_) { return false; }
 }
 
 async function sendHeartbeat(payload) {
@@ -75,6 +86,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "ytmusic-bridge-heartbeat") {
     sendHeartbeat(message.payload || {})
       .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: String(error) }));
+    return true;
+  }
+  if (message?.type === "dashboard-refresh-request") {
+    const senderUrl = _sender?.url || _sender?.tab?.url || "";
+    if (!isDashboardUrl(senderUrl)) {
+      sendResponse({ ok: false, error: "Dashboard origin is not allowed" });
+      return false;
+    }
+    requestHistoryTabsSync()
+      .then((tabs) => sendResponse({ ok: true, tabs }))
       .catch((error) => sendResponse({ ok: false, error: String(error) }));
     return true;
   }

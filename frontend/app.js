@@ -131,6 +131,14 @@ async function refresh({ silent = false } = {}) {
   return state.refreshing;
 }
 
+function requestBridgeRefresh() {
+  // The installed bridge can hear this same-origin message on the dashboard
+  // and immediately ask the YouTube Music history/liked-music tabs to resend
+  // their rendered rows. The hosted API remains the source of truth; this is
+  // only a low-friction signal for the local authenticated companion.
+  window.postMessage({ type: "ytmusic-personal-mix-refresh", requested_at: new Date().toISOString() }, window.location.origin);
+}
+
 function renderCollection() {
   let items = state.view === 'mix' ? state.ranked : state.library;
   if (state.view === 'favorites') items = items.filter(item => state.favorites.has(item.track.track_key) || item.track.liked_count > 0 || item.track.like_events > 0);
@@ -141,7 +149,7 @@ function renderCollection() {
 
 async function scan() {
   const button = $("#scan-button"); button.disabled = true; button.textContent = "Refreshing…";
-  try { const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) }); if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed"); toast(result.recommendations?.length ? "Fresh mix ready with new songs." : "Fresh request sent. New songs will appear when the provider discovery batch arrives."); await refresh(); }
+  try { requestBridgeRefresh(); const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) }); if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed"); toast(result.recommendations?.length ? "Fresh mix ready with new songs." : "Fresh request sent. New songs will appear when the provider discovery batch arrives."); await refresh(); }
   catch (error) { toast(error.message); } finally { button.disabled = false; button.textContent = "Refresh mix"; }
 }
 

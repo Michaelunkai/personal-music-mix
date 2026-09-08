@@ -88,6 +88,9 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000).
   favorites survive app restarts and remain separate from imported YouTube likes.
 - **Refresh mix** consumes the current fresh mix, requests another provider
   discovery batch, and shows only songs that are new to your listening history.
+  When the bridge is installed, the button also sends a same-origin signal to
+  the companion so its open YouTube Music history or Liked Music tab resends
+  the latest rendered rows immediately instead of waiting for the next alarm.
   The strongest play-count seeds drive discovery even before a song is explicitly
   liked; favorites refine the preference signal. With an active connector, new
   history arrives through that connector, while refreshing cached data does not
@@ -115,7 +118,7 @@ but connection readiness requires a recent authenticated bridge heartbeat.
 Without that signal the dashboard reports that automatic scanning is waiting.
 Failed local deliveries retry; unreadable HTTP responses never count as success.
 
-The extension is intentionally narrow: it does not use cookies, passwords, history outside YouTube Music, or a remote service.
+The extension is intentionally narrow: it does not use cookies, passwords, history outside YouTube Music, or a remote service. It accepts the dashboard's same-origin refresh signal only from the production site or local dashboard origins listed in `extension/content.js`; that signal only asks the service worker to request a sync from exact YouTube Music history and Liked Music tabs.
 
 ## Alternative authenticated connector
 

@@ -37,7 +37,7 @@ function contentHarness({label='', pressed=null, title='A song', favorites=false
       setInterval() {}, addEventListener() {},
     },
     chrome: { runtime: {
-      getManifest: () => ({ version: '0.1.0' }),
+      getManifest: () => ({ version: '0.1.1' }),
       onMessage: { addListener: fn => listeners.push(fn) },
       sendMessage(message, callback) {
         if (message.type === 'ytmusic-history') messages.push({ message, callback });
@@ -111,4 +111,72 @@ test('background request failure returns a retryable error and uses a deadline',
   assert.equal(response.ok, false);
   assert.match(response.error, /timeout/);
   assert.ok(requestSignal instanceof AbortSignal);
+});
+
+test('dashboard refresh signal is same-origin and reaches the service worker', async () => {
+  const listeners = [];
+  const messages = [];
+  const windowObject = { addEventListener: (name, fn) => { if (name === 'message') listeners.push(fn); } };
+  const context = vm.createContext({
+    URL,
+    location: { origin: 'https://personal-music-mix.michaelovsky55555.chatgpt.site' },
+    window: windowObject,
+    chrome: { runtime: { sendMessage: message => { messages.push(message); return Promise.resolve(); } } },
+  });
+  vm.runInContext(source('content.js'), context);
+  assert.equal(listeners.length, 1);
+  listeners[0]({
+    source: windowObject,
+    origin: 'https://personal-music-mix.michaelovsky55555.chatgpt.site',
+    data: { type: 'ytmusic-personal-mix-refresh', requested_at: '2026-09-08T00:00:00.000Z' },
+  });
+  await Promise.resolve();
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{ type: 'dashboard-refresh-request', requested_at: '2026-09-08T00:00:00.000Z' }]);
+  listeners[0]({ source: windowObject, origin: 'https://evil.example', data: { type: 'ytmusic-personal-mix-refresh' } });
+  await Promise.resolve();
+  assert.equal(messages.length, 1);
+});
+
+test('background accepts dashboard refresh only from approved origins', async () => {
+  const listeners = {};
+  const event = name => ({ addListener: fn => { listeners[name] = fn; } });
+  const sent = [];
+  const context = vm.createContext({
+    URL, AbortSignal,
+    fetch: async () => ({ ok: true, json: async () => ({}) }),
+    chrome: {
+      runtime: { onInstalled: event('installed'), onStartup: event('startup'), onMessage: event('message') },
+      alarms: { create() {}, onAlarm: event('alarm') },
+      tabs: {
+        onUpdated: event('updated'),
+        query: async () => [
+          { id: 10, url: 'https://music.youtube.com/history' },
+          { id: 11, url: 'https://music.youtube.com/playlist?list=LM' },
+          { id: 12, url: 'https://music.youtube.com/watch?v=abc12345678' },
+        ],
+        sendMessage: async (id, message) => { sent.push({ id, message }); },
+      },
+      scripting: { executeScript: async () => {} },
+      storage: { local: { get: async defaults => defaults } },
+      action: { onClicked: event('clicked') },
+    },
+  });
+  vm.runInContext(source('background.js'), context);
+  const accepted = await new Promise(resolve => listeners.message(
+    { type: 'dashboard-refresh-request' },
+    { url: 'https://personal-music-mix.michaelovsky55555.chatgpt.site/' },
+    resolve,
+  ));
+  assert.deepEqual(JSON.parse(JSON.stringify(accepted)), { ok: true, tabs: 2 });
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [
+    { id: 10, message: { type: 'sync-now' } },
+    { id: 11, message: { type: 'sync-now' } },
+  ]);
+  const denied = await new Promise(resolve => listeners.message(
+    { type: 'dashboard-refresh-request' },
+    { url: 'https://evil.example/' },
+    resolve,
+  ));
+  assert.equal(denied.ok, false);
+  assert.equal(sent.length, 2);
 });

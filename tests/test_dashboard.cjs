@@ -10,13 +10,14 @@ function harness() {
     if (!nodes.has(selector)) nodes.set(selector, { textContent: '', innerHTML: '', disabled: false, hidden: false, dataset: {}, classList: { add() {}, remove() {}, toggle() {} }, querySelector: () => node(selector + ' child') });
     return nodes.get(selector);
   };
-  const loads = [], jumps = [], configs = [];
+  const loads = [], jumps = [], configs = [], posts = [];
   const tracks = ['aaaaaaaaaaa', 'bbbbbbbbbbb'].map((id, i) => ({ track: { track_key: `video:${id}`, video_id: id, title: `Song ${i}`, artist: 'Artist' }, score: 0.5 }));
   const context = vm.createContext({
     URL, console, AbortSignal,
     document: { querySelector: node, addEventListener() {} },
     window: {
       location: { origin: 'http://127.0.0.1:8000' }, setTimeout: () => 1, clearTimeout() {},
+      postMessage: (message, origin) => posts.push({ message, origin }),
       YT: { Player: class {
         constructor(_id, config) { configs.push(config); Promise.resolve().then(() => config.events.onReady()); }
         loadPlaylist(ids, index) { loads.push({ ids: Array.from(ids), index }); }
@@ -35,7 +36,7 @@ function harness() {
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../frontend/app.js'), 'utf8'), context);
   context.tracks = tracks;
   vm.runInContext('renderRecommendations(tracks)', context);
-  return { context, node, loads, jumps, configs };
+  return { context, node, loads, jumps, configs, posts };
 }
 
 test('an activity error preserves successfully loaded music', async () => {
@@ -154,4 +155,12 @@ test('library search and favorites view filter the actual collection', () => {
   assert.match(h.node('#recommendations').innerHTML,/Song 1/);
   vm.runInContext("state.query=''; state.view='favorites'; state.favorites.add('video:aaaaaaaaaaa'); renderCollection()",h.context);
   assert.equal(vm.runInContext('state.recommendations[0].track.title',h.context),'Song 0');
+});
+
+test('Refresh mix signals the installed bridge before requesting a new batch', async () => {
+  const h = harness();
+  await vm.runInContext('scan()', h.context);
+  assert.equal(h.posts.length, 1);
+  assert.equal(h.posts[0].message.type, 'ytmusic-personal-mix-refresh');
+  assert.equal(h.posts[0].origin, 'http://127.0.0.1:8000');
 });
