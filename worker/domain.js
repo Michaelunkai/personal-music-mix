@@ -68,11 +68,17 @@ function playable(row) { return /^[A-Za-z0-9_-]{11}$/.test(String(row.video_id |
 
 function rankUnheard(rows, favorites, limit, now, excluded) {
   const byKey = new Map(rows.map(row => [row.track_key, row]));
-  const seeds = rows.filter(row => (Number(row.play_count) > 0 || liked(row, favorites)) && playable(row))
+  const allSeeds = rows.filter(row => (Number(row.play_count) > 0 || liked(row, favorites)) && playable(row));
+  const favoriteSeeds = allSeeds.filter(row => liked(row, favorites))
+    .sort((a,b) => Number(b.liked_count || 0) - Number(a.liked_count || 0)
+      || Number(b.like_events || 0) - Number(a.like_events || 0)
+      || Number(b.play_count || 0) - Number(a.play_count || 0)
+      || String(a.track_key).localeCompare(String(b.track_key)));
+  const listenedSeeds = allSeeds.filter(row => !liked(row, favorites))
     .sort((a,b) => Number(b.play_count || 0) - Number(a.play_count || 0)
-      || Number(liked(b, favorites)) - Number(liked(a, favorites))
-      || String(a.track_key).localeCompare(String(b.track_key)))
-    .slice(0, 10);
+      || Number(b.liked_count || 0) - Number(a.liked_count || 0)
+      || String(a.track_key).localeCompare(String(b.track_key)));
+  const seeds = [...favoriteSeeds, ...listenedSeeds].slice(0, 10);
   const active = new Set(seeds.map(row => row.track_key));
   const maxPlays = Math.max(1, ...seeds.map(row => Number(row.play_count || 0)));
   const artistWeights = new Map();
@@ -89,8 +95,8 @@ function rankUnheard(rows, favorites, limit, now, excluded) {
       liked:Boolean(seed.liked ?? liked(seed.source || {}, favorites)),
       seed_kind:seed.seed_kind === 'most_listened' ? 'most_listened' : (seed.seed_kind || (seed.liked ? 'favorite' : 'most_listened')),
     }))
-    .sort((a,b) => Number(b.play_count || 0) - Number(a.play_count || 0)
-      || Number(b.liked) - Number(a.liked)
+    .sort((a,b) => Number(b.liked) - Number(a.liked)
+      || Number(b.play_count || 0) - Number(a.play_count || 0)
       || String(a.track_key).localeCompare(String(b.track_key)));
   const scored = new Map();
   for (const row of rows) {
@@ -103,11 +109,11 @@ function rankUnheard(rows, favorites, limit, now, excluded) {
     const frequency = Math.min(1, Math.log1p(seed.play_count) / Math.max(1, Math.log1p(maxPlays)));
     const artistAffinity = Math.min(1, (artistWeights.get(String(row.artist || 'Unknown artist').toLowerCase()) || 0) / maxPlays);
     const favoriteSeed = Boolean(seed.liked) || seed.seed_kind === 'favorite';
-    const score = Math.min(.99, .50 + .22 * frequency + .16 * Number(favoriteSeed) + .12 * artistAffinity);
+    const score = Math.min(.99, .50 + .18 * frequency + .30 * Number(favoriteSeed) + .12 * artistAffinity);
     const reason = favoriteSeed
       ? `recommended from your favorite: ${seed.title}`
       : `recommended because you listen to ${seed.title} often`;
-    scored.set(row.track_key, {track:row,score,confidence:Math.min(.98,.45+.30*frequency+.15*Number(favoriteSeed)+.10*artistAffinity),
+    scored.set(row.track_key, {track:row,score,confidence:Math.min(.98,.45+.25*frequency+.20*Number(favoriteSeed)+.10*artistAffinity),
       reasons:[reason,'new to your listening history',`artist affinity: ${row.artist || 'Unknown artist'}`],source:'favorite_discovery'});
   }
   // Direct related imports may be represented separately by callers. Accept

@@ -208,7 +208,9 @@ class RecommendationEngine:
             and self._playable_video_id(row.get("video_id"))
         ]
         seeds.sort(key=seed_weight)
-        seeds = seeds[:10]
+        favorite_seeds = [row for row in seeds if self._liked(row)]
+        listened_seeds = [row for row in seeds if not self._liked(row)]
+        seeds = [*favorite_seeds, *listened_seeds][:10]
         active_keys = {str(row["track_key"]) for row in seeds}
         max_plays = max(1.0, *[_number(row.get("play_count")) for row in seeds])
         artist_weights: dict[str, float] = {}
@@ -231,7 +233,7 @@ class RecommendationEngine:
                 seed.setdefault("liked", self._liked(source) if source else False)
                 seed.setdefault("seed_kind", "favorite" if seed.get("liked") else "most_listened")
                 result.append(seed)
-            result.sort(key=lambda value: (-_number(value.get("play_count")), not bool(value.get("liked")), str(value.get("track_key"))))
+            result.sort(key=lambda value: (not bool(value.get("liked")), -_number(value.get("play_count")), str(value.get("track_key"))))
             return result
 
         scored: dict[str, Recommendation] = {}
@@ -255,7 +257,7 @@ class RecommendationEngine:
             artist = str(row.get("artist") or "Unknown artist").casefold()
             artist_affinity = min(1.0, artist_weights.get(artist, 0.0) / max_plays)
             liked_seed = bool(seed.get("liked")) or seed.get("seed_kind") == "favorite"
-            score = 0.50 + 0.22 * frequency + 0.16 * float(liked_seed) + 0.12 * artist_affinity
+            score = 0.50 + 0.18 * frequency + 0.30 * float(liked_seed) + 0.12 * artist_affinity
             title = str(seed.get("title") or "a song you enjoy")
             reason = (
                 f"recommended from your favorite: {title}"
@@ -269,7 +271,7 @@ class RecommendationEngine:
                 recommendation_id=_stable_id(key),
                 track=track,
                 score=min(0.99, score),
-                confidence=min(0.98, 0.45 + 0.30 * frequency + 0.15 * float(liked_seed) + 0.10 * artist_affinity),
+                confidence=min(0.98, 0.45 + 0.25 * frequency + 0.20 * float(liked_seed) + 0.10 * artist_affinity),
                 reasons=(reason, "new to your listening history", f"artist affinity: {track.artist}"),
                 source="favorite_discovery",
                 generated_at=utc_now_iso(),

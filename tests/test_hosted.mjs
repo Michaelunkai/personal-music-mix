@@ -144,3 +144,20 @@ test('fresh dashboard mode only returns unseen playable discoveries and consumes
   const firstKeys=new Set(first.items.map(item=>item.track.track_key));
   assert.ok(second.items.every(item=>!firstKeys.has(item.track.track_key)));
 });
+
+test('fresh recommendations prioritize explicit favorite seeds', async () => {
+  const env={DB:database()};
+  const request=(path,body)=>worker.fetch(new Request(`https://favorite.chatgpt.site${path}`,{
+    ...(body===undefined?{}:{method:'POST',body:JSON.stringify(body)}),
+    headers:{'Content-Type':'application/json','X-Mix-Mode':'fresh'},
+  }),env);
+  const expiry=Date.now()/1000+3600;
+  const favoriteSeed={track_key:'favorite-seed',title:'Pinned Favorite',artist:'Fav Artist',video_id:'fffffffffff',play_count:0,liked_count:1};
+  const listenedSeed={track_key:'listened-seed',title:'Most Played',artist:'Played Artist',video_id:'ggggggggggg',play_count:40,liked_count:0};
+  const candidate=(key,id,seed,kind,liked=false)=>({track_key:key,title:key,artist:'Discovery Artist',video_id:id,play_count:0,liked_count:0,source:'favorite_discovery',discovery_seeds:[{track_key:seed.track_key,title:seed.title,seed_kind:kind,play_count:seed.play_count,liked,expires_at:expiry}]});
+  await request('/api/sync/import',{tracks:[favoriteSeed,listenedSeed,candidate('from-favorite','hhhhhhhhhhh',favoriteSeed,'favorite',true),candidate('from-history','iiiiiiiiiii',listenedSeed,'most_listened')]});
+  const fresh=await (await request('/api/recommendations')).json();
+  assert.equal(fresh.items[0].track.track_key,'from-favorite');
+  assert.ok(fresh.items[0].reasons.includes('recommended from your favorite: Pinned Favorite'));
+  assert.ok(fresh.items.every(item=>item.track.play_count===0 && item.source==='favorite_discovery'));
+});
