@@ -111,7 +111,13 @@ async function refresh({ silent = false } = {}) {
       const [health, overview, recs, runs, status, latestPlaylist, connection, favorites, library] = results.map(result => result.status === 'fulfilled' ? result.value : null);
       state.favoritesReady = Boolean(favorites);
       if (favorites) state.favorites = new Set(favorites.track_keys || []);
-      if (recs) state.ranked = recs.items || [];
+      if (recs) {
+        state.ranked = recs.items || [];
+        // The fresh mix is independent of the current library/favorites view.
+        // Keep Play mix pointed at the latest server batch even when refresh
+        // runs while the user is browsing another collection.
+        state.mixRecommendations = state.ranked.slice();
+      }
       if (library) state.library = library.items || [];
       renderHealth(health || {ok:false});
       if (overview) renderOverview(overview);
@@ -192,6 +198,13 @@ async function scan() {
     const bridge = await requestBridgeRefresh();
     const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) });
     if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed");
+    if (Array.isArray(result.recommendations)) {
+      // Consume the scan response immediately, including an empty batch, so
+      // an older visible mix can never remain playable while discovery waits.
+      state.ranked = result.recommendations.slice();
+      state.mixRecommendations = state.ranked.slice();
+      renderCollection();
+    }
     // A live bridge acknowledgement or a public discovery request means the
     // local publisher has work to deliver. Give that bounded request window
     // time to acknowledge the new batch so Refresh renders newly discovered

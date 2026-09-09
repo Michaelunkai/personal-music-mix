@@ -149,6 +149,23 @@ test('Play mix keeps the saved fresh mix when browsing the library', async () =>
   assert.deepEqual(h.loads, [{ ids: ['aaaaaaaaaaa', 'bbbbbbbbbbb'], index: 0 }]);
 });
 
+test('refresh while browsing the library replaces the playable fresh mix', async () => {
+  const h = harness();
+  const freshTrack = { track: { track_key: 'video:ddddddddddd', video_id: 'ddddddddddd', title: 'Fresh song', artist: 'New artist' }, score: 0.9 };
+  const original = h.context.fetch;
+  vm.runInContext("state.ranked = tracks.slice(); state.mixRecommendations = tracks.slice(); state.view = 'all'; renderCollection()", h.context);
+  h.context.fetch = async url => {
+    if (url === '/api/recommendations') return { ok: true, text: async () => JSON.stringify({ items: [freshTrack] }) };
+    if (url === '/api/library') return { ok: true, text: async () => JSON.stringify({ items: h.context.tracks }) };
+    return original(url);
+  };
+  await vm.runInContext('refresh()', h.context);
+  assert.equal(vm.runInContext('state.ranked[0].track.track_key', h.context), 'video:ddddddddddd');
+  assert.equal(vm.runInContext('state.mixRecommendations[0].track.track_key', h.context), 'video:ddddddddddd');
+  await vm.runInContext('playMix()', h.context);
+  assert.deepEqual(h.loads, [{ ids: ['ddddddddddd'], index: 0 }]);
+});
+
 test('restricted playback and autoplay blocking have visible recovery instructions', async () => {
   const h = harness();
   await vm.runInContext('playTrack(0)', h.context);
