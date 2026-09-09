@@ -12,7 +12,7 @@ import hashlib
 import html
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any, Mapping
@@ -406,6 +406,7 @@ class HistoryEvent:
     event_key: str | None = None
     duration_seconds: int | None = None
     source_record_id: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         title = normalize_text(self.title)
@@ -421,6 +422,19 @@ class HistoryEvent:
         )
         liked = like_state is LikeState.LIKED
         source_record_id = normalize_key(self.source_record_id)
+        raw_metadata = self.metadata if isinstance(self.metadata, Mapping) else {}
+        metadata: dict[str, Any] = {}
+        position = raw_metadata.get("history_position")
+        if not isinstance(position, bool):
+            try:
+                position_value = int(float(position)) if position is not None else None
+            except (TypeError, ValueError, OverflowError):
+                position_value = None
+            if position_value is not None and position_value >= 0:
+                metadata["history_position"] = min(position_value, 500_000)
+                basis = normalize_text(raw_metadata.get("history_position_basis"), max_length=64)
+                if basis:
+                    metadata["history_position_basis"] = basis
         source = normalize_text(self.source, max_length=64).casefold()
         if source not in {
             "youtube_music",
@@ -466,6 +480,7 @@ class HistoryEvent:
         object.__setattr__(self, "event_key", event_key)
         object.__setattr__(self, "duration_seconds", duration)
         object.__setattr__(self, "source_record_id", source_record_id)
+        object.__setattr__(self, "metadata", metadata)
 
     @property
     def track(self) -> Track:
@@ -514,6 +529,7 @@ class HistoryEvent:
             "source": self.source,
             "duration_seconds": self.duration_seconds,
             "source_record_id": self.source_record_id,
+            "metadata": dict(self.metadata),
         }
 
 

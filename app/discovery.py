@@ -78,6 +78,13 @@ class FavoriteDiscovery:
 
         stats_by_key = {str(row.get("track_key")): row for row in stats if row.get("track_key")}
 
+        def history_position(row):
+            try:
+                value = row.get("history_position")
+                return int(value) if value is not None else 500_001
+            except (TypeError, ValueError, OverflowError):
+                return 500_001
+
         # Most-listened songs are the primary real-time taste signal. Explicit
         # favorites with no plays are retained as equally valid zero-play seeds.
         seeds = [
@@ -97,11 +104,12 @@ class FavoriteDiscovery:
                 -int(row.get("liked_count") or 0),
                 -int(row.get("like_events") or 0),
                 -int(row.get("play_count") or 0),
+                history_position(row),
                 row["track_key"],
             )
         )
         listened_seeds.sort(
-            key=lambda row: (-int(row.get("play_count") or 0), -int(row.get("liked_count") or 0), row["track_key"])
+            key=lambda row: (-int(row.get("play_count") or 0), -int(row.get("liked_count") or 0), history_position(row), row["track_key"])
         )
 
         new_request = bool(request_id and request_id != previous_request)
@@ -209,6 +217,7 @@ class FavoriteDiscovery:
                 "seed_kind": "favorite" if is_liked(seed) else "most_listened",
                 "play_count": int(seed.get("play_count") or 0),
                 "liked": is_liked(seed),
+                "history_position": history_position(seed),
             }
 
         # Root related calls are the first pass. On a new request, expand the

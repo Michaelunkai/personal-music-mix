@@ -6,12 +6,13 @@ export function normalizeImport(payload) {
     if (!key || key.length > 300 || keys.has(key) || !String(row.title || '').trim()) throw new Error('Invalid or duplicate library track');
     keys.add(key);
     const count = value => Math.max(0, Math.min(10000000, Number(value) || 0));
+    const position = value => Number.isFinite(Number(value)) && Number(value) >= 0 ? Math.min(500000, Math.floor(Number(value))) : null;
     return {
       track_key: key, title: String(row.title).slice(0, 500), artist: String(row.artist || 'Unknown artist').slice(0, 500),
       album: String(row.album || '').slice(0, 500), video_id: /^[\w-]{11}$/.test(row.video_id || '') ? row.video_id : null,
       url: String(row.url || '').slice(0, 1000), play_count: count(row.play_count),
       liked_count: count(row.provider_liked_count ?? (count(row.liked_count) - (row.local_favorite ? 1 : 0))),
-      like_events: count(row.like_events), latest_played_at: row.latest_played_at || null,
+      like_events: count(row.like_events), latest_played_at: row.latest_played_at || null, history_position: position(row.history_position),
       local_favorite: Boolean(row.local_favorite),
       local_favorite_updated_at: Number.isFinite(Date.parse(row.local_favorite_updated_at)) ? new Date(row.local_favorite_updated_at).toISOString() : null,
       source: row.source === 'favorite_discovery' || row.source === 'related' ? row.source : 'history',
@@ -19,7 +20,7 @@ export function normalizeImport(payload) {
         .filter(seed => typeof seed?.track_key === 'string' && seed.track_key.length <= 300 && Number.isFinite(seed.expires_at))
         .map(seed => ({track_key:seed.track_key, title:String(seed.title || 'a song you enjoy').slice(0,500), expires_at:seed.expires_at,
           seed_kind:seed.seed_kind === 'most_listened' ? 'most_listened' : 'favorite',
-          play_count:count(seed.play_count), liked:Boolean(seed.liked)})),
+          play_count:count(seed.play_count), liked:Boolean(seed.liked), history_position:position(seed.history_position)})),
     };
   });
 }
@@ -70,6 +71,21 @@ function hasPlayedEvidence(value) {
 
 function playable(row) { return /^[A-Za-z0-9_-]{11}$/.test(String(row.video_id || '')); }
 
+function historyPosition(row) {
+  const value = Number(row?.history_position);
+  return Number.isFinite(value) && value >= 0 ? value : Number.POSITIVE_INFINITY;
+}
+
+function compareHistoryPosition(a, b) {
+  const left = historyPosition(a), right = historyPosition(b);
+  if (left === right || (!Number.isFinite(left) && !Number.isFinite(right))) return 0;
+  return left - right;
+}
+
+function historyOrderScore(value) {
+  return Number.isFinite(value) ? Math.exp(-value / 50) : 0;
+}
+
 function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
   const byKey = new Map(rows.map(row => [row.track_key, row]));
   const seedRows = rows.filter(row => (Number(row.play_count) > 0 || liked(row, favorites)) && playable(row));
@@ -77,10 +93,12 @@ function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
     .sort((a,b) => Number(b.liked_count || 0) - Number(a.liked_count || 0)
       || Number(b.like_events || 0) - Number(a.like_events || 0)
       || Number(b.play_count || 0) - Number(a.play_count || 0)
+      || compareHistoryPosition(a, b)
       || String(a.track_key).localeCompare(String(b.track_key)));
   const listenedSeeds = seedRows.filter(row => !liked(row, favorites))
     .sort((a,b) => Number(b.play_count || 0) - Number(a.play_count || 0)
       || Number(b.liked_count || 0) - Number(a.liked_count || 0)
+      || compareHistoryPosition(a, b)
       || String(a.track_key).localeCompare(String(b.track_key)));
   const allSeeds = [...favoriteSeeds, ...listenedSeeds];
   // Scoring stays focused on the strongest ten signals, while every current
@@ -104,9 +122,11 @@ function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
       play_count:Number(seed.play_count ?? seed.source?.play_count ?? 0),
       liked:Boolean(seed.liked ?? liked(seed.source || {}, favorites)),
       seed_kind:seed.seed_kind === 'most_listened' ? 'most_listened' : (seed.seed_kind || (seed.liked ? 'favorite' : 'most_listened')),
+      history_position:Number.isFinite(Number(seed.history_position)) ? Number(seed.history_position) : historyPosition(seed.source),
     }))
     .sort((a,b) => Number(b.liked) - Number(a.liked)
       || Number(b.play_count || 0) - Number(a.play_count || 0)
+      || compareHistoryPosition(a, b)
       || String(a.track_key).localeCompare(String(b.track_key)));
   const scored = new Map();
   for (const row of rows) {
@@ -119,11 +139,12 @@ function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
     const frequency = Math.min(1, Math.log1p(seed.play_count) / Math.max(1, Math.log1p(maxPlays)));
     const artistAffinity = Math.min(1, (artistWeights.get(String(row.artist || 'Unknown artist').toLowerCase()) || 0) / maxPlays);
     const favoriteSeed = Boolean(seed.liked) || seed.seed_kind === 'favorite';
-    const score = Math.min(.99, .50 + .18 * frequency + .30 * Number(favoriteSeed) + .12 * artistAffinity);
+    const recency = historyOrderScore(historyPosition(seed));
+    const score = Math.min(.99, .50 + .18 * frequency + .30 * Number(favoriteSeed) + .12 * artistAffinity + .10 * recency);
     const reason = favoriteSeed
       ? `recommended from your favorite: ${seed.title}`
       : `recommended because you listen to ${seed.title} often`;
-    scored.set(row.track_key, {track:row,score,confidence:Math.min(.98,.45+.25*frequency+.20*Number(favoriteSeed)+.10*artistAffinity),
+    scored.set(row.track_key, {track:row,score,confidence:Math.min(.98,.45+.25*frequency+.20*Number(favoriteSeed)+.10*artistAffinity+.05*recency),
       reasons:[reason,'new to your listening history',`artist affinity: ${row.artist || 'Unknown artist'}`],source:'favorite_discovery'});
   }
   // Direct related imports may be represented separately by callers. Accept

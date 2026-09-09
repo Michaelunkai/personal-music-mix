@@ -36,6 +36,17 @@ def _video_id(url: str | None) -> str | None:
     return None
 
 
+def _history_position(raw: Mapping[str, Any], fallback: int) -> int:
+    value = raw.get("position", raw.get("history_position", fallback))
+    if isinstance(value, bool):
+        value = fallback
+    try:
+        position = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        position = fallback
+    return max(0, min(position, 500_000))
+
+
 class BrowserBridgeIngestor:
     name = "youtube-music-extension"
 
@@ -142,6 +153,7 @@ class BrowserBridgeIngestor:
                 played_at = None
             occurrence = occurrences[track_key]
             occurrences[track_key] += 1
+            position = _history_position(raw, index)
             source_record_id = BrowserBridgeIngestor._row_identity(
                 page,
                 raw,
@@ -166,6 +178,17 @@ class BrowserBridgeIngestor:
             if source_record_id in seen:
                 continue
             seen.add(source_record_id)
+            metadata = {}
+            if not favorites:
+                # Rendered YouTube Music history is newest-first. Preserve
+                # that order as an explicit recency signal when the provider
+                # exposes no timestamp; never turn it into a fake play time.
+                metadata.update({
+                    "history_position": position,
+                    "history_position_basis": "rendered_history_order",
+                })
+            if favorites or (raw.get("like_state_known") is True and isinstance(raw.get("liked"), bool)):
+                metadata["provider_like_state"] = liked
             items.append(
                 TrackRecord(
                     track_key=track_key,
@@ -178,7 +201,7 @@ class BrowserBridgeIngestor:
                     video_id=video_id,
                     played_at=played_at,
                     liked=liked,
-                    metadata={'provider_like_state':liked} if favorites or (raw.get('like_state_known') is True and isinstance(raw.get('liked'),bool)) else {},
+                    metadata=metadata,
                     source=BrowserBridgeIngestor.name,
                     event_id=source_record_id,
                     source_record_id=source_record_id,

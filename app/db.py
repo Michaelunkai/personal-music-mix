@@ -862,6 +862,15 @@ class Database:
                       c.title, COALESCE(c.artist, 'Unknown artist') AS artist, c.artists_json, c.album,
                       c.url, c.video_id, c.first_seen_at, c.last_seen_at, c.liked_count, c.source, c.updated_at,
                       COUNT(h.history_event_id) AS play_count, MAX(h.played_at) AS latest_played_at,
+                      COALESCE(
+                          (SELECT MIN(CAST(json_extract(hp.metadata_json, '$.history_position') AS INTEGER))
+                           FROM history_events hp
+                           WHERE hp.track_id = c.track_id AND hp.source = 'youtube-music-extension'
+                             AND json_extract(hp.metadata_json, '$.history_position') IS NOT NULL),
+                          (SELECT MIN(ho.history_event_id)
+                           FROM history_events ho
+                           WHERE ho.track_id = c.track_id AND ho.source = 'youtube-music-extension')
+                      ) AS history_position,
                       CASE WHEN EXISTS(SELECT 1 FROM user_likes u WHERE u.track_id=c.track_id AND u.profile_id!='dashboard')
                            THEN COALESCE((SELECT SUM(u.liked) FROM user_likes u WHERE u.track_id=c.track_id AND u.profile_id!='dashboard'),0)
                            ELSE COALESCE(SUM(CASE WHEN h.liked = 1 THEN 1 ELSE 0 END),0) END AS like_events,
@@ -891,6 +900,7 @@ class Database:
                     'seed_kind':entry.get('seed_kind','favorite'),
                     'play_count':entry.get('play_count',0),
                     'liked':bool(entry.get('liked', entry.get('seed_kind') == 'favorite')),
+                    'history_position':entry.get('history_position'),
                 })
         for row in result:
             row['discovery_seeds'] = relationships.get(row['track_key'],[])

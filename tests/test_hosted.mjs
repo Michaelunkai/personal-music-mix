@@ -172,6 +172,18 @@ test('fresh dashboard mode only returns unseen playable discoveries and clears a
   assert.ok(second.items.every(item=>!firstKeys.has(item.track.track_key)));
 });
 
+test('equal-play unheard discovery follows rendered history recency instead of key order', () => {
+  const rows = normalizeImport({tracks: [
+    {track_key: 'seed-old', title: 'Old seed', artist: 'History', video_id: 'aaaaaaaaaaa', play_count: 1, history_position: 99},
+    {track_key: 'seed-recent', title: 'Recent seed', artist: 'History', video_id: 'bbbbbbbbbbb', play_count: 1, history_position: 0},
+    {track_key: 'candidate-old', title: 'A candidate', artist: 'Discovery', video_id: 'ccccccccccc', play_count: 0, source: 'favorite_discovery', discovery_seeds: [{track_key: 'seed-old', title: 'Old seed', seed_kind: 'most_listened', play_count: 1, liked: false, history_position: 99, expires_at: Date.now() / 1000 + 3600}]},
+    {track_key: 'candidate-recent', title: 'Z candidate', artist: 'Discovery', video_id: 'ddddddddddd', play_count: 0, source: 'favorite_discovery', discovery_seeds: [{track_key: 'seed-recent', title: 'Recent seed', seed_kind: 'most_listened', play_count: 1, liked: false, history_position: 0, expires_at: Date.now() / 1000 + 3600}]},
+  ]});
+  const ranked = rankTracks(rows, new Set(), 2, Date.now(), {unheardOnly: true});
+  assert.equal(ranked[0].track.track_key, 'candidate-recent');
+  assert.match(ranked[0].reasons[0], /Recent seed/);
+});
+
 test('refresh replaces a full fresh mix with an empty visible batch when no candidates arrive', async () => {
   const env={DB:database()};
   const request=(path,body)=>worker.fetch(new Request(`https://preserve.chatgpt.site${path}`,{

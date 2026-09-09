@@ -92,7 +92,7 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
             heartbeat = Request(origin.rstrip('/')+'/api/sync/heartbeat', data=json.dumps({'discovery':discovery_status}).encode(),headers={'Content-Type':'application/json','OAI-Sites-Authorization':'Bearer '+token},method='POST')
             with urlopen(heartbeat,timeout=20) as response:
                 json.load(response)
-        published_fields = ('track_key','title','artist','album','video_id','url','play_count','liked_count','provider_liked_count','like_events','latest_played_at','local_favorite','local_favorite_updated_at','source','discovery_seeds')
+        published_fields = ('track_key','title','artist','album','video_id','url','play_count','liked_count','provider_liked_count','like_events','latest_played_at','history_position','local_favorite','local_favorite_updated_at','source','discovery_seeds')
         tracks = [{key:row.get(key) for key in published_fields} for row in database.list_track_stats(limit=10000)]
         fingerprint = hashlib.sha256(json.dumps({"origin":origin.rstrip("/"),"tracks":tracks}, sort_keys=True).encode()).hexdigest()
         if database.get_metadata("cloud_synced_fingerprint") == fingerprint:

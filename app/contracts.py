@@ -309,6 +309,7 @@ class TrackRecord:
             "source": self.source,
             "event_id": self.event_id,
             "source_record_id": self.source_record_id,
+            "metadata": dict(self.metadata),
         }
 
 

@@ -414,6 +414,20 @@ def normalize_history_record(
 
     source_value = _first_present(record, "source")
     source = _safe_source(source_value, _safe_source(default_source, "youtube_music"))
+    raw_metadata = _first_from_record(record, nested, "metadata", "meta")
+    metadata: dict[str, Any] = {}
+    if isinstance(raw_metadata, Mapping):
+        position = raw_metadata.get("history_position")
+        if not isinstance(position, bool):
+            try:
+                position_value = int(float(position)) if position is not None else None
+            except (TypeError, ValueError, OverflowError):
+                position_value = None
+            if position_value is not None and position_value >= 0:
+                metadata["history_position"] = min(position_value, 500_000)
+                basis = normalize_text(raw_metadata.get("history_position_basis"), max_length=64)
+                if basis:
+                    metadata["history_position_basis"] = basis
     return HistoryEvent(
         track_key=track_key,
         title=title,
@@ -426,6 +440,7 @@ def normalize_history_record(
         duration_seconds=duration_seconds,
         source_record_id=source_record_id,
         event_key=event_key,
+        metadata=metadata,
     )
 
 

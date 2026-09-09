@@ -174,6 +174,19 @@ class RecommendationEngine:
     def _playable_video_id(value: Any) -> bool:
         return bool(re.fullmatch(r"[A-Za-z0-9_-]{11}", str(value or "")))
 
+    @staticmethod
+    def _history_position(row: Mapping[str, Any]) -> float:
+        try:
+            value = row.get("history_position")
+            return float(value) if value is not None and float(value) >= 0 else float("inf")
+        except (TypeError, ValueError, OverflowError):
+            return float("inf")
+
+    @classmethod
+    def _history_order_score(cls, row: Mapping[str, Any]) -> float:
+        position = cls._history_position(row)
+        return math.exp(-position / 50.0) if math.isfinite(position) else 0.0
+
     def _recommend_unheard(
         self,
         stats: Sequence[Mapping[str, Any]],
@@ -197,7 +210,7 @@ class RecommendationEngine:
         def seed_weight(row: Mapping[str, Any]) -> tuple[float, float, float, str]:
             plays = _number(row.get("play_count"))
             liked = 1.0 if self._liked(row) else 0.0
-            return (-plays, -liked, -_recency(row.get("latest_played_at")), str(row.get("track_key")))
+            return (-plays, -liked, self._history_position(row), str(row.get("track_key")))
 
         # Every played song can seed discovery. Explicit likes remain strong
         # zero-play seeds, so importing a Liked Music snapshot is sufficient.
@@ -261,7 +274,9 @@ class RecommendationEngine:
             artist = str(row.get("artist") or "Unknown artist").casefold()
             artist_affinity = min(1.0, artist_weights.get(artist, 0.0) / max_plays)
             liked_seed = bool(seed.get("liked")) or seed.get("seed_kind") == "favorite"
-            score = 0.50 + 0.18 * frequency + 0.30 * float(liked_seed) + 0.12 * artist_affinity
+            history_position = self._history_position(seed)
+            recency = math.exp(-history_position / 50.0) if math.isfinite(history_position) else 0.0
+            score = 0.50 + 0.18 * frequency + 0.30 * float(liked_seed) + 0.12 * artist_affinity + 0.10 * recency
             title = str(seed.get("title") or "a song you enjoy")
             reason = (
                 f"recommended from your favorite: {title}"
@@ -275,7 +290,7 @@ class RecommendationEngine:
                 recommendation_id=_stable_id(key),
                 track=track,
                 score=min(0.99, score),
-                confidence=min(0.98, 0.45 + 0.25 * frequency + 0.20 * float(liked_seed) + 0.10 * artist_affinity),
+                confidence=min(0.98, 0.45 + 0.25 * frequency + 0.20 * float(liked_seed) + 0.10 * artist_affinity + 0.05 * recency),
                 reasons=(reason, "new to your listening history", f"artist affinity: {track.artist}"),
                 source="favorite_discovery",
                 generated_at=utc_now_iso(),

@@ -93,6 +93,28 @@ def test_provider_event_identity_ignores_position_and_metadata():
     assert first.items[0].event_id == second.items[1].event_id
 
 
+def test_untimestamped_history_order_survives_bridge_and_stats_aggregation(tmp_path: Path):
+    from fastapi.testclient import TestClient
+    from app.api import create_app
+
+    settings = _settings(tmp_path / 'history-order.sqlite3')
+    payload = {
+        'page': 'https://music.youtube.com/history',
+        'items': [
+            {'title': 'Newest', 'artist': 'Artist', 'url': 'https://music.youtube.com/watch?v=aaaaaaaaaaa', 'position': 0},
+            {'title': 'Older', 'artist': 'Artist', 'url': 'https://music.youtube.com/watch?v=bbbbbbbbbbb', 'position': 1},
+        ],
+    }
+    with TestClient(create_app(settings)) as client:
+        response = client.post('/api/browser/sync', json=payload)
+        assert response.status_code == 200, response.text
+        rows = client.get('/api/library').json()['items']
+
+    by_key = {item['track']['track_key']: item['track'] for item in rows}
+    assert by_key['video:aaaaaaaaaaa']['history_position'] == 0
+    assert by_key['video:bbbbbbbbbbb']['history_position'] == 1
+
+
 def test_provider_id_enrichment_reuses_legacy_slots_and_labels_are_not_timestamps(tmp_path):
     from fastapi.testclient import TestClient
     from app.api import create_app
