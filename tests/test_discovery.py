@@ -68,7 +68,11 @@ def test_forced_refresh_retry_survives_valid_cache_and_cooldown():
         service.refresh('requested')
         assert len(provider.calls)==3
         service.refresh('next-request')
-        assert len(provider.calls)==4
+        # The refill target is intentionally checked before the cache is
+        # empty. The one remaining candidate therefore gets one frontier
+        # probe, which is then marked exhausted when the provider returns no
+        # new song.
+        assert len(provider.calls)==5
 
 
 def test_explicit_favorite_keeps_a_discovery_seed_slot_with_large_history():
@@ -219,6 +223,39 @@ def test_refresh_expands_provider_frontier_after_cached_batch_is_served():
         }
         assert not ({item.track.track_key for item in first_batch} & {item.track.track_key for item in second_batch})
         assert all('new to your listening history' in item.reasons for item in second_batch)
+
+
+def test_refresh_refills_before_cached_candidates_are_empty():
+    with Database() as db:
+        seed = track('a', 'Most Played')
+        db.upsert_track(seed)
+        db.record_history_event(seed.video_id, source_event_id='played-a', title=seed.title, artist=seed.artist)
+        provider = ExpandingProvider()
+        service = FavoriteDiscovery(db, provider)
+
+        service.refresh()
+        service.refresh('request-one')
+        first = RecommendationEngine().recommend(
+            db.list_track_stats(limit=10000),
+            limit=1,
+            exclude_keys=db.recommendation_exclusion_keys(),
+            only_unheard=True,
+        )
+        db.save_recommendations('run-one', first)
+
+        status = service.refresh('request-two')
+
+        assert status['expanded_count'] == 2
+        assert status['candidate_count'] == 5
+        fresh = RecommendationEngine().recommend(
+            db.list_track_stats(limit=10000),
+            limit=10,
+            exclude_keys=db.recommendation_exclusion_keys(),
+            only_unheard=True,
+        )
+        assert {item.track.track_key for item in fresh} == {
+            'video:' + letter * 11 for letter in 'cdefg'
+        }
 
 
 class SearchProvider(ExpandingProvider):

@@ -13,7 +13,9 @@ from .connectors.ytmusic_api import YtMusicApiConnector
 # the local sync loop hostage. The frontier is persisted in app metadata and
 # lets later refreshes expand through provider-confirmed songs discovered from
 # the user's strongest signals instead of repeatedly asking only the same
-# three roots.
+# three roots. A refill target is used instead of waiting for an empty cache:
+# the hosted worker must be able to replace a served 50-song batch in one
+# refresh without ever exposing a short list.
 _CACHE_KEY = "favorite_discovery_cache"
 _FRONTIER_KEY = "favorite_discovery_frontier"
 _SEARCH_KEY = "favorite_discovery_search"
@@ -21,12 +23,13 @@ _REQUEST_KEY = "favorite_discovery_request"
 _SEQUENCE_KEY = "favorite_discovery_sequence"
 _STATUS_KEY = "favorite_discovery_status"
 _CACHE_SECONDS = 6 * 60 * 60
-_RELATED_LIMIT = 25
-_SEED_LIMIT = 8
-_FAVORITE_SEED_LIMIT = 4
-_FRONTIER_BATCH = 3
-_MAX_FRONTIER_DEPTH = 2
-_SEARCH_BATCH = 2
+_REFILL_TARGET = 50
+_RELATED_LIMIT = 50
+_SEED_LIMIT = 12
+_FAVORITE_SEED_LIMIT = 6
+_FRONTIER_BATCH = 8
+_MAX_FRONTIER_DEPTH = 4
+_SEARCH_BATCH = 6
 _MAX_FRONTIER_ENTRIES = 2_000
 
 
@@ -257,8 +260,8 @@ class FavoriteDiscovery:
 
             served = self.database.recommendation_exclusion_keys()
             current_rows = {row.get("track_key"): row for row in self.database.list_track_stats(limit=10000)}
-            return sum(
-                1
+            candidates = {
+                key
                 for value in cache.values()
                 if value.get("expires_at", 0) > moment
                 for key in value.get("track_keys", [])
@@ -269,17 +272,18 @@ class FavoriteDiscovery:
                     or current_rows.get(key, {}).get("liked_count", 0) > 0
                     or current_rows.get(key, {}).get("like_events", 0) > 0
                 )
-            )
+            }
+            return len(candidates)
 
         if (
             new_request
             and had_acknowledged_request
             and root_entries_ready
             and selected
-            # Consume the current durable batch before spending network calls
-            # on another frontier hop. This keeps refreshes fast while still
-            # ensuring the next batch is ready once the existing one is gone.
-            and cached_candidate_count() == 0
+            # Refill before the durable cache is empty. This gives the hosted
+            # worker enough unheard rows to publish a complete replacement
+            # batch while its previous complete batch remains visible.
+            and cached_candidate_count() < _REFILL_TARGET
         ):
             # Expand a rotating subset of provider-confirmed songs. Results
             # are attributed to the original root cache entry so recommender
