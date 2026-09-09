@@ -90,8 +90,8 @@ test('hosted refresh queues discovery and only acknowledged delivery clears pend
   try {
     Date.now=()=>originalNow()+600000;
     const expiredPreview=await (await call('/api/playlists/preview',{name:'After expiry'})).json();
-    assert.equal(expiredPreview.plan.items.length,0);
-    assert.equal(expiredPreview.plan.requested_count,0);
+    assert.equal(expiredPreview.plan.items.length,1);
+    assert.equal(expiredPreview.plan.requested_count,1);
     assert.equal(expiredPreview.plan.name,'After expiry');
   } finally {Date.now=originalNow;}
   await call('/api/scan',{});
@@ -271,7 +271,7 @@ test('repeated fresh refreshes consume a finite pool without recycling and end e
     batches.push(keys);
   }
 
-  assert.deepEqual(batches.map(batch=>batch.length),[20,20,5,0]);
+  assert.deepEqual(batches.map(batch=>batch.length),[45,0,0,0]);
   assert.equal(seen.size,candidates.length);
   assert.deepEqual(batches[3],[]);
   const finalRefresh=await (await request('/api/recommendations')).json();
@@ -312,14 +312,14 @@ test('concurrent fresh refreshes reserve disjoint batches', async () => {
   }),env);
   const expiry=Date.now()/1000+3600;
   const seed={track_key:'concurrent-seed',title:'Most Played Seed',artist:'Signal Artist',video_id:'aaaaaaaaaaa',play_count:50,liked_count:0};
-  const candidates=Array.from({length:40},(_,index)=>({track_key:`concurrent-${index}`,title:`Concurrent Candidate ${index}`,artist:'Discovery Artist',video_id:String(index+100).padStart(11,'0'),play_count:0,liked_count:0,source:'favorite_discovery',discovery_seeds:[{track_key:seed.track_key,title:seed.title,seed_kind:'most_listened',play_count:seed.play_count,liked:false,expires_at:expiry}]}));
+  const candidates=Array.from({length:100},(_,index)=>({track_key:`concurrent-${index}`,title:`Concurrent Candidate ${index}`,artist:'Discovery Artist',video_id:String(index+100).padStart(11,'0'),play_count:0,liked_count:0,source:'favorite_discovery',discovery_seeds:[{track_key:seed.track_key,title:seed.title,seed_kind:'most_listened',play_count:seed.play_count,liked:false,expires_at:expiry}]}));
   await request('/api/sync/import',{tracks:[seed,...candidates],defer_rebuild:true});
   const responses=await Promise.all([request('/api/scan',{}),request('/api/scan',{})]);
   const batches=await Promise.all(responses.map(response=>response.json()));
   const keys=batches.map(batch=>batch.recommendations.map(item=>item.track.track_key));
   assert.ok(keys.every(batch=>batch.length>0));
   assert.equal(keys[0].filter(key=>keys[1].includes(key)).length,0);
-  assert.equal(new Set(keys.flat()).size,40);
+  assert.equal(new Set(keys.flat()).size,100);
 });
 
 test('served-key synchronization does not evict older exclusions', async () => {
@@ -386,4 +386,30 @@ test('hosted fresh mix keeps candidates from rotated listening seeds', async () 
   const fresh=await (await request('/api/recommendations')).json();
   assert.deepEqual(fresh.items.map(item=>item.track.track_key),[candidate.track_key]);
   assert.ok(fresh.items[0].reasons.some(reason=>reason.includes('Rotated seed')));
+});
+
+test('hosted fresh mix backfills at least fifty valid unseen songs from expired discovery seeds', async () => {
+  const env={DB:database()};
+  const request=(path,body)=>worker.fetch(new Request(`https://minimum-fifty.chatgpt.site${path}`,{
+    ...(body===undefined?{}:{method:'POST',body:JSON.stringify(body)}),
+    headers:{'Content-Type':'application/json','X-Mix-Mode':'fresh'},
+  }),env);
+  const seed={track_key:'fifty-seed',title:'Most Played Seed',artist:'Signal Artist',video_id:'aaaaaaaaaaa',play_count:50,liked_count:0};
+  const candidates=Array.from({length:60},(_,index)=>({
+    track_key:`fifty-candidate-${index}`,
+    title:`Fresh candidate ${index}`,
+    artist:'Discovery Artist',
+    video_id:String(index+100).padStart(11,'0'),
+    play_count:0,
+    liked_count:0,
+    like_events:0,
+    latest_played_at:null,
+    source:'favorite_discovery',
+    discovery_seeds:[{track_key:seed.track_key,title:seed.title,seed_kind:'most_listened',play_count:seed.play_count,liked:false,expires_at:Date.now()/1000-1}],
+  }));
+  await request('/api/sync/import',{tracks:[seed,...candidates],defer_rebuild:true});
+  const fresh=await (await request('/api/scan',{})).json();
+  assert.equal(fresh.recommendations.length,50);
+  assert.equal(new Set(fresh.recommendations.map(item=>item.track.track_key)).size,50);
+  assert.ok(fresh.recommendations.every(item=>item.track.play_count===0 && item.track.liked_count===0 && item.track.video_id));
 });

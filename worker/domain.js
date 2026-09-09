@@ -28,7 +28,7 @@ export function rankTracks(rows, favorites, limit = 20, now = Date.now(), option
   const unheardOnly = Boolean(options?.unheardOnly);
   const excluded = new Set(options?.excludeKeys || []);
   const excludedVideos = new Set(options?.excludeVideoIds || []);
-  if (unheardOnly) return rankUnheard(rows, favorites, limit, now, excluded, excludedVideos);
+  if (unheardOnly) return rankUnheard(rows, favorites, limit, excluded, excludedVideos);
   const active = new Set(rows.filter(row => favorites.has(row.track_key) || row.liked_count > 0 || row.like_events > 0).map(row=>row.track_key));
   const seedsFor = row => (row.discovery_seeds || []).filter(seed=>active.has(seed.track_key) && seed.expires_at * 1000 > now);
   rows = rows.filter(row => row.source !== 'favorite_discovery' || row.play_count > 0 || active.has(row.track_key) || seedsFor(row).length);
@@ -70,7 +70,7 @@ function hasPlayedEvidence(value) {
 
 function playable(row) { return /^[A-Za-z0-9_-]{11}$/.test(String(row.video_id || '')); }
 
-function rankUnheard(rows, favorites, limit, now, excluded, excludedVideos) {
+function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
   const byKey = new Map(rows.map(row => [row.track_key, row]));
   const seedRows = rows.filter(row => (Number(row.play_count) > 0 || liked(row, favorites)) && playable(row));
   const favoriteSeeds = seedRows.filter(row => liked(row, favorites))
@@ -93,8 +93,11 @@ function rankUnheard(rows, favorites, limit, now, excluded, excludedVideos) {
     const artist = String(seed.artist || 'Unknown artist').toLowerCase();
     artistWeights.set(artist, Math.max(artistWeights.get(artist) || 0, Number(seed.play_count || 0)));
   }
+  // A previously discovered song remains a valid backfill candidate while it
+  // is still unheard. Expiry controls when the companion refreshes provider
+  // data; it must not make an existing unseen song disappear from the mix.
   const seedFor = row => (Array.isArray(row.discovery_seeds) ? row.discovery_seeds : [])
-    .filter(seed => active.has(seed.track_key) && Number(seed.expires_at) * 1000 > now)
+    .filter(seed => active.has(seed.track_key))
     .map(seed => ({...seed, source:byKey.get(seed.track_key)}))
     .map(seed => ({...seed,
       title:String(seed.title || seed.source?.title || 'a song you enjoy'),

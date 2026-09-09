@@ -211,7 +211,7 @@ async function scan() {
     // songs in the same user action, while a fully offline companion returns
     // immediately because waitForHostedRefresh exits when it is not online.
     // Any non-empty result is already a valid new batch, even when the
-    // provider returned fewer than the requested 20 songs. Show it now rather
+    // provider returned fewer than the requested 50 songs. Show it now rather
     // than waiting 60 seconds or preserving an older batch that would repeat
     // songs the user already saw. Wait only when this refresh produced no
     // unseen songs and a live companion may still deliver another batch.

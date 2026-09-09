@@ -28,7 +28,7 @@ DEFAULT_YOUTUBE_MUSIC_HISTORY_URL: Final[str] = (
     "https://music.youtube.com/history"
 )
 DEFAULT_SCAN_LIMIT: Final[int] = 1_000
-DEFAULT_RECOMMENDATION_LIMIT: Final[int] = 20
+DEFAULT_RECOMMENDATION_LIMIT: Final[int] = 50
 DEFAULT_SCHEDULER_INTERVAL_SECONDS: Final[int] = 3_600
 DEFAULT_ENABLE_PLAYLIST_WRITES: Final[bool] = False
 DEFAULT_CORS_ORIGINS: Final[tuple[str, ...]] = (

@@ -5,6 +5,7 @@ import { normalizeImport, rankTracks } from './domain.js';
 
 const now = () => new Date().toISOString();
 const json = (body, status=200) => Response.json(body, {status, headers:{'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'}});
+const FRESH_MIX_LIMIT = 50;
 const readState = async (db,key) => { const row = await db.prepare('SELECT payload FROM music_state WHERE key=?').bind(key).first(); return row ? JSON.parse(row.payload) : null; };
 const saveState = (db,key,value) => db.prepare('INSERT INTO music_state(key,payload) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload').bind(key,JSON.stringify(value));
 const requestDiscovery = db => saveState(db,'discovery_request',{id:crypto.randomUUID(),requested_at:now()}).run();
@@ -23,7 +24,12 @@ const activeItem = (item, rowsByKey, favorites, nowMs = Date.now()) => {
   const freshSource = item?.source === 'favorite_discovery' || item?.source === 'related' || row.source === 'favorite_discovery' || row.source === 'related';
   const seeds = Array.isArray(row.discovery_seeds) ? row.discovery_seeds : [];
   const related = item?.source === 'related' || row.source === 'related';
-  return freshSource && !played && !liked && playable && (related || seeds.some(seed => Number(seed.expires_at) * 1000 > nowMs));
+  const seedBackfill = seeds.some(seed => {
+    const source = rowsByKey.get(seed.track_key);
+    return Boolean(source && (Number(source.play_count) > 0 || favorites.has(seed.track_key) || Number(source.liked_count) > 0 || Number(source.like_events) > 0 || Boolean(source.local_favorite)))
+      || Number(seed.play_count) > 0 || Boolean(seed.liked);
+  });
+  return freshSource && !played && !liked && playable && (related || seedBackfill);
 };
 async function servedLedger(db, rows = []) {
   const [history, local, records] = await Promise.all([
@@ -120,7 +126,7 @@ async function rebuildUnlocked(db) {
   if (!rows.length) return {status:'failed',run:{message:'No listening history is available yet. Connect the local bridge first.'}};
   await db.prepare("DELETE FROM music_served WHERE reservation_id IS NOT NULL AND julianday(served_at) < julianday('now','-15 minutes')").run();
   let served = await servedLedger(db,rows);
-  let rankedItems = rankTracks(rows,favorites,20,Date.now(),{unheardOnly:true,excludeKeys:served.keys,excludeVideoIds:served.videos});
+  let rankedItems = rankTracks(rows,favorites,FRESH_MIX_LIMIT,Date.now(),{unheardOnly:true,excludeKeys:served.keys,excludeVideoIds:served.videos});
   // The durable unique video index is the reservation boundary.  It closes
   // the race where two refreshes read the same served set before either one
   // writes its next visible batch.
@@ -131,7 +137,7 @@ async function rebuildUnlocked(db) {
   // empty batch that discarded still-available candidates.
   if (!reservation.items.length && rankedItems.length) {
     served = await servedLedger(db,rows);
-    rankedItems = rankTracks(rows,favorites,20,Date.now(),{unheardOnly:true,excludeKeys:served.keys,excludeVideoIds:served.videos});
+    rankedItems = rankTracks(rows,favorites,FRESH_MIX_LIMIT,Date.now(),{unheardOnly:true,excludeKeys:served.keys,excludeVideoIds:served.videos});
     reservation = await reserveFreshItems(db,rankedItems);
   }
   const freshItems = reservation.items;
