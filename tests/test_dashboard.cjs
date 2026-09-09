@@ -213,15 +213,15 @@ test('Refresh remains usable but explains when the live bridge is unavailable', 
   assert.match(h.node('#toast').textContent, /saved history/);
 });
 
-test('Refresh uses a returned fresh batch without waiting on background discovery', async () => {
+test('Refresh uses a returned complete fresh batch without waiting on background discovery', async () => {
   const h = harness();
   vm.runInContext('globalThis.waitCalls = 0; waitForHostedRefresh = async () => { globalThis.waitCalls += 1; return {}; }', h.context);
   const original = h.context.fetch;
-  const fullBatch = Array.from({ length: 20 }, (_, index) => ({
+  const fullBatch = Array.from({ length: 50 }, (_, index) => ({
     track: { track_key: `video:full-${String(index).padStart(2, '0')}`, video_id: 'aaaaaaaaaaa', title: `Full song ${index}`, artist: 'Artist' },
   }));
   h.context.fetch = async url => {
-    if (url === '/api/scan') return { ok: true, text: async () => JSON.stringify({ status: 'completed', recommendations: fullBatch }) };
+    if (url === '/api/scan') return { ok: true, text: async () => JSON.stringify({ status: 'completed', recommendations: fullBatch, preserved_previous_mix: false }) };
     if (url === '/api/recommendations') return { ok: true, text: async () => JSON.stringify({ items: h.context.tracks }) };
     return original(url);
   };
@@ -229,7 +229,7 @@ test('Refresh uses a returned fresh batch without waiting on background discover
   assert.equal(vm.runInContext('globalThis.waitCalls', h.context), 0);
 });
 
-test('Refresh shows a partial fresh batch without waiting or recycling an older one', async () => {
+test('Refresh waits when only a partial fresh batch arrives', async () => {
   const h = harness();
   vm.runInContext("state.ranked=[tracks[1]]; state.mixRecommendations=[tracks[1]]; renderCollection()", h.context);
   vm.runInContext('globalThis.waitCalls = 0; waitForHostedRefresh = async () => { globalThis.waitCalls += 1; return {}; }', h.context);
@@ -240,7 +240,7 @@ test('Refresh shows a partial fresh batch without waiting or recycling an older 
     return original(url);
   };
   await vm.runInContext('scan()', h.context);
-  assert.equal(vm.runInContext('globalThis.waitCalls', h.context), 0);
+  assert.equal(vm.runInContext('globalThis.waitCalls', h.context), 1);
   assert.equal(vm.runInContext('state.ranked[0].track.track_key', h.context), 'video:aaaaaaaaaaa');
   assert.notEqual(vm.runInContext('state.ranked[0].track.track_key', h.context), 'video:bbbbbbbbbbb');
 });

@@ -212,6 +212,45 @@ test('refresh replaces a full fresh mix with an empty visible batch when no cand
   assert.ok([...firstKeys].every(key=>!latest.plan.items.some(item=>item.track_key===key)));
 });
 
+test('partial refresh preserves a full fresh mix until a complete replacement arrives', async () => {
+  const env={DB:database()};
+  const request=(path,body)=>worker.fetch(new Request(`https://minimum-visible.chatgpt.site${path}`,
+    body===undefined ? {headers:{'X-Mix-Mode':'fresh'}} : {method:'POST',body:JSON.stringify(body),headers:{'Content-Type':'application/json','X-Mix-Mode':'fresh'}}),env);
+  const expiry=Date.now()/1000+3600;
+  const seed={track_key:'minimum-visible-seed',title:'Most Played Seed',artist:'Signal Artist',video_id:'aaaaaaaaaaa',play_count:50,liked_count:0};
+  const candidates=Array.from({length:60},(_,index)=>({
+    track_key:`minimum-visible-${index}`,
+    title:`Minimum visible candidate ${index}`,
+    artist:'Discovery Artist',
+    video_id:String(index+100).padStart(11,'0'),
+    play_count:0,
+    liked_count:0,
+    source:'favorite_discovery',
+    discovery_seeds:[{track_key:seed.track_key,title:seed.title,seed_kind:'most_listened',play_count:seed.play_count,liked:false,expires_at:expiry}],
+  }));
+  await request('/api/sync/import',{tracks:[seed,...candidates],defer_rebuild:true});
+  const first=await (await request('/api/scan',{})).json();
+  const firstKeys=first.recommendations.map(item=>item.track.track_key);
+  assert.equal(firstKeys.length,50);
+
+  const partial=await (await request('/api/scan',{})).json();
+  assert.equal(partial.preserved_previous_mix,true);
+  assert.equal(partial.recommendations.length,50);
+  assert.deepEqual(partial.recommendations.map(item=>item.track.track_key),firstKeys);
+  assert.equal(partial.playlist_preview.requested_count,50);
+  assert.match(partial.run.message,/Waiting for a complete 50-song batch/);
+
+  const visible=await (await request('/api/recommendations')).json();
+  assert.equal(visible.count,50);
+  assert.deepEqual(visible.items.map(item=>item.track.track_key),firstKeys);
+  const ledger=await (await request('/api/favorites')).json();
+  assert.equal(ledger.served_keys.length,50);
+
+  const retry=await (await request('/api/scan',{})).json();
+  assert.equal(retry.preserved_previous_mix,true);
+  assert.deepEqual(retry.recommendations.map(item=>item.track.track_key),firstKeys);
+});
+
 test('refresh replaces a full fresh mix with a smaller unseen batch without overlap', async () => {
   const env={DB:database()};
   const request=(path,body)=>worker.fetch(new Request(`https://favorite-preserve.chatgpt.site${path}`,{

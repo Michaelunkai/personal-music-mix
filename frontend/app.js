@@ -199,28 +199,26 @@ async function scan() {
     const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) });
     if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed");
     if (Array.isArray(result.recommendations)) {
-      // Consume the scan response immediately, including an empty batch, so
-      // an older visible mix can never remain playable while discovery waits.
+      // Consume the authoritative scan response immediately.  The hosted
+      // worker returns the existing complete mix when a provider response is
+      // partial, so the page never drops below the fifty-song target while
+      // discovery is still expanding.
       state.ranked = result.recommendations.slice();
       state.mixRecommendations = state.ranked.slice();
       renderCollection();
     }
     // A live bridge acknowledgement or a public discovery request means the
     // local publisher has work to deliver. Give that bounded request window
-    // time to acknowledge the new batch so Refresh renders newly discovered
-    // songs in the same user action, while a fully offline companion returns
-    // immediately because waitForHostedRefresh exits when it is not online.
-    // Any non-empty result is already a valid new batch, even when the
-    // provider returned fewer than the requested 50 songs. Show it now rather
-    // than waiting 60 seconds or preserving an older batch that would repeat
-    // songs the user already saw. Wait only when this refresh produced no
-    // unseen songs and a live companion may still deliver another batch.
-    const hasFreshBatch = Array.isArray(result.recommendations) && result.recommendations.length > 0;
-    const hosted = hasFreshBatch ? null : await waitForHostedRefresh({ timeoutMs: 60000 });
+    // time to acknowledge a complete replacement, while a preserved full mix
+    // is already safe to keep visible during provider expansion.
+    const preservedFullMix = result.preserved_previous_mix === true;
+    const hasFreshBatch = Array.isArray(result.recommendations) && result.recommendations.length >= 50 && !preservedFullMix;
+    const hosted = hasFreshBatch || preservedFullMix ? null : await waitForHostedRefresh({ timeoutMs: 60000 });
     const hostedPending = Boolean(hosted?.hosted && hosted?.discovery?.pending);
     const providerExhausted = hosted?.discovery?.state === "exhausted";
     const bridgeOffline = !bridge?.ok;
-    if (providerExhausted) toast("No new unseen songs are available in the current provider pool yet. Refresh again later for another discovery batch.");
+    if (preservedFullMix) toast("Your complete 50-song mix remains ready while more new songs arrive.");
+    else if (providerExhausted) toast("No new unseen songs are available in the current provider pool yet. Refresh again later for another discovery batch.");
     else if (bridgeOffline && hostedPending) toast("Refresh requested from saved history; the browser bridge and hosted discovery are still reconnecting.");
     else if (bridgeOffline) toast(result.recommendations?.length ? "Fresh mix ready from saved history. Connect YouTube Music for live account updates." : "Refresh requested from saved history. New songs will appear when provider discovery arrives.");
     else if (hostedPending) toast("Live history received. Fresh discovery is still arriving; your mix will update automatically.");

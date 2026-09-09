@@ -35,8 +35,10 @@ as long as they are still unheard, allowing the existing unseen pool to refill
 the 50-song target while the companion reconnects. Failed requests retry after
 five minutes. No account credentials are needed for public discovery, and no
 plays or favorites are invented. If fewer than 50 genuinely qualifying songs
-exist, the app reports the shortfall rather than fabricating or relaxing the
-freshness/playability criteria.
+exist for a replacement, the app keeps an already-complete 50-song mix visible
+while discovery continues; when no complete mix exists yet, it reports the
+valid shortfall rather than fabricating or relaxing the freshness/playability
+criteria.
 
 The bridge accepts visible rows from the exact history page and the YouTube Music
 Liked Music collection (`/playlist?list=LM`). Favorites are stored without adding
@@ -104,10 +106,12 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000).
   before rebuilding the hosted mix; an unavailable bridge falls back to the
   saved snapshot after a short timeout.
 - If fewer than 50 qualifying playable candidates are currently available, the
-  For you tab shows the valid shortfall and the connection panel reports whether
-  discovery is pending, temporarily unavailable, or exhausted. It never fills
-  the target with heard, liked, unplayable, or duplicate songs. The Favorites
-  and All songs tabs still expose the saved library.
+  For you tab keeps an existing complete 50-song mix in place while the
+  connection panel reports whether discovery is pending, temporarily
+  unavailable, or exhausted. Before the first complete mix exists, it shows
+  the valid shortfall. It never fills the target with heard, liked, unplayable,
+  or duplicate songs. The Favorites and All songs tabs still expose the saved
+  library.
 - YouTube may block embedding, age-restrict, remove, or region-restrict a song.
   Playback errors offer **Next** and **Open song in YouTube Music**. Browser
   autoplay restrictions may require clicking Play inside the embedded player.

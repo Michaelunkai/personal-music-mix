@@ -141,18 +141,39 @@ async function rebuildUnlocked(db) {
     reservation = await reserveFreshItems(db,rankedItems);
   }
   const freshItems = reservation.items;
-  // Every completed refresh replaces the visible batch with only songs that
-  // are new to the listening history and absent from the durable served
-  // ledger. Never preserve the previous batch: doing so makes a partial
-  // provider response look healthy while recycling songs the user already
-  // saw. An empty result is an honest exhausted/awaiting-discovery state.
+  const previous = await readState(db,'runs') || [];
+  const previousRecommendations = await readState(db,'recommendations') || [];
+  const oldPlan = await readState(db,'playlist');
+  // A provider can deliver a partial discovery response while the local
+  // bridge is still expanding its frontier. Never let that partial response
+  // displace an already complete visible mix: doing so creates a moment where
+  // the dashboard shows fewer than the requested fifty songs. Release the
+  // reservation so those partial candidates remain available for the next
+  // complete replacement attempt.
+  const preservedItems = await currentFreshItems(db,rows,favorites,previousRecommendations);
+  if (freshItems.length < FRESH_MIX_LIMIT && preservedItems.length >= FRESH_MIX_LIMIT) {
+    await releaseReservation(db,reservation.reservationId);
+    const preservedPlan = {
+      ...oldPlan,
+      name:oldPlan?.name || 'Your personal mix',
+      status:'preview',
+      requested_count:preservedItems.length,
+      items:preservedItems.map(row => row.track || row),
+      generated_at:oldPlan?.generated_at || now(),
+    };
+    const run = {run_id:crypto.randomUUID(),status:'completed',items_seen:rows.length,finished_at:now(),message:`Waiting for a complete ${FRESH_MIX_LIMIT}-song batch; ${freshItems.length} new qualifying songs are held until the provider supplies the rest.`};
+    await db.batch([
+      saveState(db,'recommendations',preservedItems),
+      saveState(db,'playlist',preservedPlan),
+      saveState(db,'runs',[run,...previous].slice(0,20)),
+    ]);
+    return {status:'completed',run,recommendations:preservedItems,playlist_preview:preservedPlan,preserved_previous_mix:true,available_new_items:freshItems.length,target_count:FRESH_MIX_LIMIT};
+  }
   const visibleItems = freshItems;
   const nextServed = mergeKeys([...served.keys], freshItems.map(item => trackKey(item)).filter(Boolean));
   const run = {run_id:crypto.randomUUID(),status:'completed',items_seen:rows.length,finished_at:now(),message:freshItems.length
     ? `Fresh mix built from your most-listened songs and favorites; ${freshItems.length} songs are new to your listening history.`
     : 'No new unseen songs are available yet. Refresh requested another provider discovery batch.'};
-  const previous = await readState(db,'runs') || [];
-  const oldPlan = await readState(db,'playlist');
   const plan = {name:oldPlan?.name || 'Your personal mix',status:'preview',requested_count:visibleItems.length,items:visibleItems.map(row=>row.track || row),generated_at:freshItems.length ? now() : (oldPlan?.generated_at || now())};
   try {
     await db.batch([saveState(db,'recommendations',visibleItems),saveState(db,'playlist',plan),saveState(db,'recommendation_history',nextServed),saveState(db,'runs',[run,...previous].slice(0,20)),db.prepare('UPDATE music_served SET reservation_id=NULL WHERE reservation_id=?').bind(reservation.reservationId)]);
