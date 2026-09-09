@@ -85,3 +85,48 @@ def test_cloud_sync_pulls_newer_favorites_even_without_local_changes(tmp_path, m
     assert cloud_sync.publish_library(db,config)['state'] == 'unchanged'
     config.write_text(json.dumps({'origin':'https://other.chatgpt.site','database_path':str(db.path),'encrypted_token':'test'}))
     assert cloud_sync.publish_library(db,config)['state'] == 'synced'
+
+
+def test_cloud_sync_does_not_reupload_after_hosted_rebuild_timeout(tmp_path, monkeypatch):
+    import io
+    import json
+    from app import cloud_sync
+
+    db = Database(tmp_path / 'rebuild-timeout.sqlite3')
+    db.initialize()
+    HistoryService(db).ingest([{'title': 'Song', 'artist': 'Artist', 'video_id': 'aaaaaaaaaaa'}])
+    config = tmp_path / 'cloud.json'
+    config.write_text(json.dumps({
+        'origin': 'https://rebuild-timeout.chatgpt.site',
+        'database_path': str(db.path),
+        'encrypted_token': 'test',
+    }))
+    monkeypatch.setattr(cloud_sync, '_unprotect', lambda _: 'test-only')
+    imports = []
+    rebuild_failures = [True]
+
+    def urlopen(request, timeout):
+        if request.get_method() != 'POST':
+            return io.StringIO(json.dumps({'records': [], 'served_keys': []}))
+        if request.full_url.endswith('/api/sync/import'):
+            imports.append(json.loads(request.data))
+            return io.StringIO(json.dumps({'status': 'completed'}))
+        if request.full_url.endswith('/api/scan'):
+            if rebuild_failures:
+                rebuild_failures.pop()
+                raise TimeoutError('hosted rebuild did not finish')
+            return io.StringIO(json.dumps({'status': 'completed'}))
+        if request.full_url.endswith('/api/sync/ledger'):
+            return io.StringIO(json.dumps({'status': 'completed'}))
+        raise AssertionError(request.full_url)
+
+    monkeypatch.setattr(cloud_sync, 'urlopen', urlopen)
+
+    first = cloud_sync.publish_library(db, config)
+    assert first['state'] == 'pending_rebuild'
+    assert len(imports) == 1
+    assert imports[0]['defer_rebuild'] is True
+
+    second = cloud_sync.publish_library(db, config)
+    assert second['state'] == 'synced'
+    assert len(imports) == 1

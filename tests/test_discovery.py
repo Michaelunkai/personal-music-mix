@@ -129,6 +129,8 @@ def test_cloud_does_not_ack_discovery_until_import_succeeds(tmp_path,monkeypatch
                 return io.StringIO('{"status":"completed"}')
             if req.full_url.endswith('/api/sync/ledger'):
                 return io.StringIO('{"status":"completed"}')
+            if req.full_url.endswith('/api/scan'):
+                return io.StringIO('{"status":"completed"}')
             return io.StringIO('{"records":[]}')
         monkeypatch.setattr(cloud_sync,'urlopen',request)
         discovery=FavoriteDiscovery(db,Provider(()))

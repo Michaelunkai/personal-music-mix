@@ -15,6 +15,12 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 
+_IMPORT_CHUNK_SIZE = 250
+_IMPORT_TIMEOUT_SECONDS = 30
+_REBUILD_TIMEOUT_SECONDS = 90
+_REBUILD_PENDING_KEY = "cloud_rebuild_pending"
+
+
 def _unprotect(encoded: str) -> str:
     class Blob(ctypes.Structure):
         _fields_ = [("size", ctypes.c_ulong), ("data", ctypes.POINTER(ctypes.c_ubyte))]
@@ -74,6 +80,19 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
         if discovery is not None:
             discovery_status = discovery.refresh((favorites.get('discovery_request') or {}).get('id'))
 
+        def trigger_hosted_rebuild():
+            request = Request(
+                origin.rstrip("/") + "/api/scan",
+                data=b"{}",
+                headers={"Content-Type": "application/json", "OAI-Sites-Authorization": "Bearer " + token},
+                method="POST",
+            )
+            with urlopen(request, timeout=_REBUILD_TIMEOUT_SECONDS) as response:
+                result = json.load(response)
+            if result.get("status") != "completed":
+                raise RuntimeError("Private site did not confirm the hosted mix rebuild")
+            return result
+
         def publish_served_ledger():
             keys = sorted(database.recommendation_exclusion_keys())
             ledger_request = Request(
@@ -96,10 +115,17 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
         tracks = [{key:row.get(key) for key in published_fields} for row in database.list_track_stats(limit=10000)]
         fingerprint = hashlib.sha256(json.dumps({"origin":origin.rstrip("/"),"tracks":tracks}, sort_keys=True).encode()).hexdigest()
         if database.get_metadata("cloud_synced_fingerprint") == fingerprint:
+            had_pending_rebuild = database.get_metadata(_REBUILD_PENDING_KEY) == "1"
+            if had_pending_rebuild:
+                rebuilt = trigger_hosted_rebuild()
+                hosted_recommendation_keys = _recommendation_keys(rebuilt)
+                if hosted_recommendation_keys:
+                    cloud_served_merged += database.merge_cloud_served_keys(hosted_recommendation_keys)
+                database.set_metadata(_REBUILD_PENDING_KEY, "0")
             publish_served_ledger()
             report_discovery()
             result = {
-                "state": "unchanged",
+                "state": "synced" if had_pending_rebuild else "unchanged",
                 "tracks": len(tracks),
                 "origin": origin,
                 "served_keys_merged": cloud_served_merged,
@@ -111,25 +137,28 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
         # is present.  The bound still protects the request body on unusually
         # large histories.
         hosted_recommendation_keys: list[str] = []
-        for offset in range(0, len(tracks), 500):
-            chunk = tracks[offset:offset+500]
-            defer_rebuild = offset + len(chunk) < len(tracks)
+        for offset in range(0, len(tracks), _IMPORT_CHUNK_SIZE):
+            chunk = tracks[offset:offset+_IMPORT_CHUNK_SIZE]
             body = json.dumps({
                 "tracks": chunk,
                 "last_sync_at": database.get_metadata("browser_bridge_last_sync"),
-                # The hosted worker rebuilds only after the final chunk.  A
-                # rebuild per chunk can make the last response replace a
-                # healthy fresh mix with an empty one when its chunk has no
-                # active seed rows.
-                "defer_rebuild": defer_rebuild,
+                # Imports and rebuilds are separate durable operations.  A
+                # timed-out rebuild must never make the publisher replay the
+                # entire library and create overlapping D1 work.
+                "defer_rebuild": True,
             }).encode("utf-8")
             request = Request(origin.rstrip("/") + "/api/sync/import", data=body, headers={"Content-Type": "application/json", "OAI-Sites-Authorization": "Bearer " + token}, method="POST")
-            with urlopen(request, timeout=20) as response:
+            with urlopen(request, timeout=_IMPORT_TIMEOUT_SECONDS) as response:
                 result = json.load(response)
             if result.get("status") != "completed":
                 raise RuntimeError("Private site did not confirm the library update")
-            if not defer_rebuild:
-                hosted_recommendation_keys = _recommendation_keys(result)
+        # Commit the import fingerprint before the hosted rebuild.  If the
+        # rebuild is slow or canceled, the next pass retries only that small
+        # operation instead of replaying every import chunk.
+        database.set_metadata("cloud_synced_fingerprint", fingerprint)
+        database.set_metadata(_REBUILD_PENDING_KEY, "1")
+        rebuilt = trigger_hosted_rebuild()
+        hosted_recommendation_keys = _recommendation_keys(rebuilt)
         if hosted_recommendation_keys:
             # The hosted rebuild may have consumed a fresh batch while this
             # publisher was uploading the library. Pull those keys into the
@@ -142,7 +171,7 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
             "origin": origin,
             "served_keys_merged": cloud_served_merged,
         }
-        database.set_metadata("cloud_synced_fingerprint", fingerprint)
+        database.set_metadata(_REBUILD_PENDING_KEY, "0")
         publish_served_ledger()
         report_discovery()
     except Exception as exc:
@@ -151,7 +180,7 @@ def publish_library(database, config_path: Path | None = None, *, discovery=None
         # caller can still rebuild its local fresh cache around the newly
         # learned hosted exclusions.
         result = {
-            "state": "failed",
+            "state": "pending_rebuild" if database.get_metadata(_REBUILD_PENDING_KEY) == "1" else "failed",
             "error": type(exc).__name__,
             "served_keys_merged": cloud_served_merged,
         }
