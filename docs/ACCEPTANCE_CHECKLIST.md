@@ -4,7 +4,7 @@ This file is the durable completion checklist for the user-requested outcome. It
 separates what the application can prove locally from what must be proven with
 the user's currently authenticated YouTube Music account.
 
-## Current continuation gate: 2026-09-08
+## Current continuation gate: 2026-09-09
 
 This section supersedes older current-state claims below; those snapshots are
 historical evidence, not current account connectivity or playback proof.
@@ -12,9 +12,9 @@ historical evidence, not current account connectivity or playback proof.
 | User acceptance criterion | Current evidence and state |
 |---|---|
 | Playlist based on THEIR YouTube favorites | **Unverified for the real account**: the saved library has no confirmed provider favorites. Dedicated partial Liked Music collection ingestion, zero-play favorites, and favorite-derived artist affinity pass automated tests. Actual collection still requires the approved browser connection. |
-| Easy refresh whenever requested | **API and discovery contract verified; live UI unverified**: refresh rebuilds a saved mix and queues public related-song discovery from current favorites. The local app pulls requests every 30 seconds. The hosted target is 50 fresh songs, using still-unheard cached discoveries as a bounded backfill while provider requests refresh. Tests cover retries, stale-seed backfill, removing a source favorite, delivery acknowledgment, polling and item counts. A provider shortfall is reported rather than filled with heard or invalid songs. |
+| Easy refresh whenever requested | **50-song replacement guard verified**: refresh rebuilds a saved mix and queues public related-song discovery from current favorites. The hosted target is 50 fresh songs, using still-unheard cached discoveries as a bounded backfill while provider requests refresh. A partial provider response cannot displace an already-complete 50-song mix; it is held until a complete replacement arrives. Tests cover retries, stale-seed backfill, delivery acknowledgment, polling, item counts, and partial-batch preservation. |
 | Listen to recommended songs within this website | **Unverified in a real browser**: embedded-player queue, next/previous, errors and autoplay instructions pass simulated API tests. No audible playback proof. YouTube may prohibit individual tracks; an external link is recovery only, not fulfillment of in-site playback. |
-| Professional deployed real URL | Owner-only production site exists at https://personal-music-mix.michaelovsky55555.chatgpt.site. D1 retains the hosted library/favorites. Saved-source and deployment receipts identify each release. |
+| Professional deployed real URL | Public production site exists at https://personal-music-mix.michaelovsky55555.chatgpt.site and is reachable without a dashboard login. D1 retains the hosted library/favorites. Saved-source and deployment receipts identify each release. |
 | Automatic correct signed-in account after restart | **Unverified**: approved runtime fails before browser discovery; no authenticated heartbeat. Local launcher and persistence are tested; Chrome/extension activation is a separate gate. |
 | Stored history and account preserved | SQLite backup before restart; semantic cloud-sync fingerprints, conservative history identity reconciliation and per-source favorites avoid duplicate plays and preference replacement. No profile, cookies or account credentials modified. |
 
