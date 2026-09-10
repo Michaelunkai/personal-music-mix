@@ -18,6 +18,14 @@ function database() {
   return {prepare,async batch(items) {sqlite.exec('BEGIN');try {const results=[];for(const item of items)results.push(await item.run());sqlite.exec('COMMIT');return results;}catch(e){sqlite.exec('ROLLBACK');throw e;}}};
 }
 
+test('header exposes the named public GitHub repository', () => {
+  const html = readFileSync(new URL('../frontend/index.html', import.meta.url), 'utf8');
+  assert.match(html, /class="github-link"/);
+  assert.match(html, /href="https:\/\/github\.com\/Michaelunkai\/personal-music-mix"/);
+  assert.match(html, />Beautifully marked down<\/span>/);
+  assert.match(html, /target="_blank" rel="noopener noreferrer"/);
+});
+
 test('built hosted app persists import, favorites, refresh and full library', async () => {
   const env = {DB:database()};
   const call = async (path,body,headers={}) => worker.fetch(new Request(`https://example.chatgpt.site${path}`,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify(body)}),env);
