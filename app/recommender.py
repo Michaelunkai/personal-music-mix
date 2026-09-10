@@ -223,12 +223,19 @@ class RecommendationEngine:
         seeds.sort(key=seed_weight)
         favorite_seeds = [row for row in seeds if self._liked(row)]
         listened_seeds = [row for row in seeds if not self._liked(row)]
-        # Keep the strongest ten seeds for scoring, but keep every playable
-        # listening/favorite row active for cached discovery lineage. A later
-        # refresh may rotate to a weaker seed; its provider-confirmed songs
-        # must remain eligible instead of making the mix look exhausted.
+        # Keep a balanced scoring frontier: explicit favorites get up to six
+        # slots, and the remaining slots come from the strongest listened
+        # songs. Every playable seed remains active for cached discovery
+        # lineage, but selection must cover this frontier instead of allowing
+        # one high-play song to consume the whole mix.
         all_seed_keys = {str(row["track_key"]) for row in [*favorite_seeds, *listened_seeds]}
-        seeds = [*favorite_seeds, *listened_seeds][:10]
+        favorite_frontier = favorite_seeds[:6]
+        seeds = [
+            *favorite_frontier,
+            *listened_seeds[: max(0, 12 - len(favorite_frontier))],
+        ]
+        scoring_seed_keys = {str(row["track_key"]) for row in seeds}
+        seed_rows = {str(row["track_key"]): row for row in seeds}
         max_plays = max(1.0, *[_number(row.get("play_count")) for row in seeds])
         artist_weights: dict[str, float] = {}
         for seed in seeds:
@@ -250,10 +257,19 @@ class RecommendationEngine:
                 seed.setdefault("liked", self._liked(source) if source else False)
                 seed.setdefault("seed_kind", "favorite" if seed.get("liked") else "most_listened")
                 result.append(seed)
-            result.sort(key=lambda value: (not bool(value.get("liked")), -_number(value.get("play_count")), str(value.get("track_key"))))
+            result.sort(
+                key=lambda value: (
+                    str(value.get("track_key")) not in scoring_seed_keys,
+                    not bool(value.get("liked")),
+                    -_number(value.get("play_count")),
+                    self._history_position(value),
+                    str(value.get("track_key")),
+                )
+            )
             return result
 
         scored: dict[str, Recommendation] = {}
+        candidate_seed_keys: dict[str, tuple[str, ...]] = {}
         for row in rows:
             key = str(row.get("track_key") or "")
             plays = _number(row.get("play_count"))
@@ -269,6 +285,12 @@ class RecommendationEngine:
             if not seeds_for_row:
                 continue
             seed = seeds_for_row[0]
+            matched_seed_keys = tuple(
+                str(value.get("track_key"))
+                for value in seeds_for_row
+                if str(value.get("track_key")) in scoring_seed_keys
+            )
+            candidate_seed_keys[key] = matched_seed_keys
             seed_plays = _number(seed.get("play_count"))
             frequency = min(1.0, math.log1p(seed_plays) / max(1.0, math.log1p(max_plays)))
             artist = str(row.get("artist") or "Unknown artist").casefold()
@@ -283,6 +305,12 @@ class RecommendationEngine:
                 if liked_seed
                 else f"recommended because you listen to {title} often"
             )
+            additional_titles = [
+                str(value.get("title") or "a song you enjoy")
+                for value in seeds_for_row[1:2]
+            ]
+            if additional_titles:
+                reason += f"; also matches {additional_titles[0]}"
             track = _track_from_row(row)
             if track is None:
                 continue
@@ -297,21 +325,41 @@ class RecommendationEngine:
             )
 
         # A direct related response is also accepted when it is genuinely new
-        # and playable. Its reason is anchored to the strongest seed rather
-        # than presenting the related item as already heard.
+        # and playable. Connectors may annotate it with the seed(s) that were
+        # queried; otherwise retain the strongest seed as a safe fallback.
         strongest_seed = seeds[0] if seeds else None
         for track in related_candidates:
             if not isinstance(track, TrackRecord) or track.track_key in excluded or track.track_key in by_key or track.track_key in scored:
                 continue
             if not self._playable_video_id(track.video_id):
                 continue
-            seed_title = str((strongest_seed or {}).get("title") or "your listening history")
-            seed_plays = _number((strongest_seed or {}).get("play_count"))
+            metadata = track.metadata if isinstance(track.metadata, Mapping) else {}
+            raw_metadata_keys = metadata.get("discovery_seed_keys")
+            if isinstance(raw_metadata_keys, str):
+                metadata_keys = [raw_metadata_keys]
+            elif isinstance(raw_metadata_keys, (list, tuple, set)):
+                metadata_keys = [str(value) for value in raw_metadata_keys]
+            else:
+                metadata_keys = []
+            metadata_key = metadata.get("discovery_seed_key")
+            if metadata_key:
+                metadata_keys.append(str(metadata_key))
+            matching_seed_keys = tuple(key for key in metadata_keys if key in scoring_seed_keys)
+            if not matching_seed_keys and strongest_seed:
+                matching_seed_keys = (str(strongest_seed.get("track_key")),)
+            candidate_seed_keys[track.track_key] = matching_seed_keys
+            seed_row = seed_rows.get(matching_seed_keys[0]) if matching_seed_keys else strongest_seed
+            seed_title = str((seed_row or {}).get("title") or "your listening history")
+            seed_plays = _number((seed_row or {}).get("play_count"))
             reason = (
                 f"recommended because you listen to {seed_title} often"
                 if seed_plays > 0
                 else f"recommended from your favorite: {seed_title}"
             )
+            if len(matching_seed_keys) > 1:
+                second_seed = seed_rows.get(matching_seed_keys[1])
+                if second_seed:
+                    reason += f"; also matches {second_seed.get('title') or 'another favorite'}"
             artist_affinity = min(1.0, artist_weights.get(track.artist.casefold(), 0.0) / max_plays)
             scored[track.track_key] = Recommendation(
                 recommendation_id=_stable_id(track.track_key),
@@ -323,13 +371,46 @@ class RecommendationEngine:
                 generated_at=utc_now_iso(),
             )
 
-        ordered = sorted(
-            scored.values(),
-            key=lambda item: (
+        def order_key(item: Recommendation) -> tuple[float, float, str, str]:
+            return (
                 -round(float(item.score), 9),
                 -round(float(item.confidence or 0), 9),
                 item.track.artist.casefold(),
                 item.track.title.casefold(),
-            ),
-        )[:limit]
+            )
+
+        ranked = sorted(
+            scored.values(),
+            key=order_key,
+        )
+        # Interleave the strongest candidates from distinct seed songs. This
+        # preserves relevance within each group while making the first page
+        # represent the user's broader taste instead of one dominant history
+        # item. Candidates that match multiple seeds participate in each group
+        # but are emitted only once.
+        grouped: dict[str, list[Recommendation]] = {key: [] for key in scoring_seed_keys}
+        for item in ranked:
+            for seed_key in candidate_seed_keys.get(item.track.track_key, ()):
+                if seed_key in grouped:
+                    grouped[seed_key].append(item)
+        for values in grouped.values():
+            values.sort(key=order_key)
+        ordered: list[Recommendation] = []
+        emitted: set[str] = set()
+        while len(ordered) < limit:
+            progress = False
+            for seed_key in (str(seed.get("track_key")) for seed in seeds):
+                for item in grouped.get(seed_key, ()):
+                    if item.track.track_key in emitted:
+                        continue
+                    emitted.add(item.track.track_key)
+                    ordered.append(item)
+                    progress = True
+                    break
+                if len(ordered) >= limit:
+                    break
+            if not progress:
+                break
+        ordered.extend(item for item in ranked if item.track.track_key not in emitted)
+        ordered = ordered[:limit]
         return [replace(item, rank=index) for index, item in enumerate(ordered, start=1)]

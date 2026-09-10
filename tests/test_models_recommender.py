@@ -97,3 +97,56 @@ def test_unheard_mix_keeps_candidates_from_rotated_listening_seed():
         only_unheard=True,
     )
     assert [item.track.track_key for item in result] == [candidate["track_key"]]
+
+
+def test_unheard_mix_interleaves_distinct_taste_seeds():
+    import time
+
+    expiry = time.time() + 3600
+    seeds = [
+        {
+            "track_key": f"video:{index:011d}",
+            "title": f"Taste root {index}",
+            "artist": f"Root artist {index}",
+            "video_id": f"{index:011d}",
+            "play_count": 10,
+            "liked_count": 0,
+        }
+        for index in range(6)
+    ]
+    candidates = []
+    for seed_index, seed in enumerate(seeds):
+        for candidate_index in range(4):
+            video_id = f"{seed_index:02d}{candidate_index:09d}"
+            candidates.append(
+                {
+                    "track_key": f"candidate:{video_id}",
+                    "title": f"Candidate {seed_index}-{candidate_index}",
+                    "artist": f"Discovery artist {seed_index}",
+                    "video_id": video_id,
+                    "play_count": 0,
+                    "liked_count": 0,
+                    "source": "favorite_discovery",
+                    "discovery_seeds": [
+                        {
+                            "track_key": seed["track_key"],
+                            "title": seed["title"],
+                            "seed_kind": "most_listened",
+                            "play_count": seed["play_count"],
+                            "liked": False,
+                            "expires_at": expiry,
+                        }
+                    ],
+                }
+            )
+
+    result = RecommendationEngine().recommend(
+        [*seeds, *candidates], limit=12, exclude_keys=set(), only_unheard=True
+    )
+    root_counts = {
+        seed["title"]: sum(seed["title"] in " ".join(item.reasons) for item in result)
+        for seed in seeds
+    }
+    assert len(result) == 12
+    assert root_counts == {seed["title"]: 2 for seed in seeds}
+    assert result[0].reasons[0].endswith("Taste root 0 often")

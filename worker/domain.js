@@ -101,9 +101,14 @@ function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
       || compareHistoryPosition(a, b)
       || String(a.track_key).localeCompare(String(b.track_key)));
   const allSeeds = [...favoriteSeeds, ...listenedSeeds];
-  // Scoring stays focused on the strongest ten signals, while every current
-  // playable seed remains active so rotated cached discovery cannot disappear.
-  const seeds = allSeeds.slice(0, 10);
+  // Keep a balanced scoring frontier: explicit favorites get up to six
+  // slots, and the remaining slots come from the strongest listened songs.
+  // Every current playable seed remains active so rotated cached discovery
+  // cannot disappear, but the output must cover this frontier instead of
+  // letting one high-play song consume the whole mix.
+  const favoriteFrontier = favoriteSeeds.slice(0, 6);
+  const seeds = [...favoriteFrontier, ...listenedSeeds.slice(0, Math.max(0, 12 - favoriteFrontier.length))];
+  const scoringSeedKeys = new Set(seeds.map(row => row.track_key));
   const active = new Set(allSeeds.map(row => row.track_key));
   const maxPlays = Math.max(1, ...seeds.map(row => Number(row.play_count || 0)));
   const artistWeights = new Map();
@@ -124,11 +129,13 @@ function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
       seed_kind:seed.seed_kind === 'most_listened' ? 'most_listened' : (seed.seed_kind || (seed.liked ? 'favorite' : 'most_listened')),
       history_position:Number.isFinite(Number(seed.history_position)) ? Number(seed.history_position) : historyPosition(seed.source),
     }))
-    .sort((a,b) => Number(b.liked) - Number(a.liked)
+    .sort((a,b) => Number(scoringSeedKeys.has(a.track_key)) - Number(scoringSeedKeys.has(b.track_key))
+      || Number(b.liked) - Number(a.liked)
       || Number(b.play_count || 0) - Number(a.play_count || 0)
       || compareHistoryPosition(a, b)
       || String(a.track_key).localeCompare(String(b.track_key)));
   const scored = new Map();
+  const candidateSeedKeys = new Map();
   for (const row of rows) {
     const plays = Number(row.play_count || 0);
     const isLiked = liked(row, favorites);
@@ -136,14 +143,18 @@ function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
     const seedsForRow = seedFor(row);
     if (!seedsForRow.length) continue;
     const seed = seedsForRow[0];
+    candidateSeedKeys.set(row.track_key, seedsForRow
+      .map(value => value.track_key)
+      .filter(key => scoringSeedKeys.has(key)));
     const frequency = Math.min(1, Math.log1p(seed.play_count) / Math.max(1, Math.log1p(maxPlays)));
     const artistAffinity = Math.min(1, (artistWeights.get(String(row.artist || 'Unknown artist').toLowerCase()) || 0) / maxPlays);
     const favoriteSeed = Boolean(seed.liked) || seed.seed_kind === 'favorite';
     const recency = historyOrderScore(historyPosition(seed));
     const score = Math.min(.99, .50 + .18 * frequency + .30 * Number(favoriteSeed) + .12 * artistAffinity + .10 * recency);
-    const reason = favoriteSeed
+    let reason = favoriteSeed
       ? `recommended from your favorite: ${seed.title}`
       : `recommended because you listen to ${seed.title} often`;
+    if (seedsForRow.length > 1) reason += `; also matches ${seedsForRow[1].title}`;
     scored.set(row.track_key, {track:row,score,confidence:Math.min(.98,.45+.25*frequency+.20*Number(favoriteSeed)+.10*artistAffinity+.05*recency),
       reasons:[reason,'new to your listening history',`artist affinity: ${row.artist || 'Unknown artist'}`],source:'favorite_discovery'});
   }
@@ -152,14 +163,45 @@ function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
   const strongest = seeds[0];
   for (const row of rows) {
     if (row.source !== 'related' || excluded.has(row.track_key) || excludedVideos.has(row.video_id) || Number(row.play_count || 0) > 0 || hasPlayedEvidence(row.latest_played_at) || liked(row, favorites) || !playable(row) || scored.has(row.track_key) || !strongest) continue;
-    const reason = Number(strongest.play_count || 0) > 0
-      ? `recommended because you listen to ${strongest.title} often`
-      : `recommended from your favorite: ${strongest.title}`;
+    const relatedSeeds = seedFor(row).filter(value => scoringSeedKeys.has(value.track_key));
+    candidateSeedKeys.set(row.track_key, relatedSeeds.map(value => value.track_key));
+    const seed = relatedSeeds[0] || strongest;
+    let reason = Number(seed.play_count || 0) > 0
+      ? `recommended because you listen to ${seed.title} often`
+      : `recommended from your favorite: ${seed.title}`;
+    if (relatedSeeds.length > 1) reason += `; also matches ${relatedSeeds[1].title}`;
     scored.set(row.track_key, {track:row,score:.44,confidence:.40,reasons:[reason,'new to your listening history',`artist affinity: ${row.artist || 'Unknown artist'}`],source:'related'});
   }
   const seenVideoIds = new Set();
-  return [...scored.values()]
-    .sort((a,b) => b.score - a.score || b.confidence - a.confidence || String(a.track.artist || '').localeCompare(String(b.track.artist || '')) || String(a.track.title || '').localeCompare(String(b.track.title || '')))
+  const order = (a,b) => b.score - a.score || b.confidence - a.confidence || String(a.track.artist || '').localeCompare(String(b.track.artist || '')) || String(a.track.title || '').localeCompare(String(b.track.title || ''));
+  const ranked = [...scored.values()].sort(order);
+  // Interleave distinct seed groups so the first page represents the user's
+  // broader taste. A candidate matching multiple seeds is emitted once.
+  const grouped = new Map(seeds.map(seed => [seed.track_key, []]));
+  for (const item of ranked) {
+    for (const seedKey of candidateSeedKeys.get(item.track.track_key) || []) {
+      if (grouped.has(seedKey)) grouped.get(seedKey).push(item);
+    }
+  }
+  for (const values of grouped.values()) values.sort(order);
+  const ordered = [];
+  const emitted = new Set();
+  while (ordered.length < Math.max(1, Math.min(Number(limit) || 20, 200))) {
+    let progress = false;
+    for (const seed of seeds) {
+      for (const item of grouped.get(seed.track_key) || []) {
+        if (emitted.has(item.track.track_key)) continue;
+        emitted.add(item.track.track_key);
+        ordered.push(item);
+        progress = true;
+        break;
+      }
+      if (ordered.length >= Math.max(1, Math.min(Number(limit) || 20, 200))) break;
+    }
+    if (!progress) break;
+  }
+  ordered.push(...ranked.filter(item => !emitted.has(item.track.track_key)));
+  return ordered
     .filter(item => {
       const videoId = item.track.video_id;
       if (seenVideoIds.has(videoId)) return false;

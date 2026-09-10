@@ -416,6 +416,28 @@ test('fresh recommendations prioritize explicit favorite seeds', async () => {
   assert.ok(fresh.items.every(item=>item.track.play_count===0 && item.source==='favorite_discovery'));
 });
 
+test('fresh ranking interleaves distinct taste seeds', () => {
+  const expiry=Date.now()/1000+3600;
+  const seeds=Array.from({length:6},(_,index)=>(
+    {track_key:`taste-seed-${index}`,title:`Taste root ${index}`,artist:`Root artist ${index}`,video_id:String(index).padStart(11,'0'),play_count:10,liked_count:0}
+  ));
+  const candidates=seeds.flatMap((seed,seedIndex)=>Array.from({length:4},(_,candidateIndex)=>({
+    track_key:`taste-candidate-${seedIndex}-${candidateIndex}`,
+    title:`Candidate ${seedIndex}-${candidateIndex}`,
+    artist:`Discovery artist ${seedIndex}`,
+    video_id:`${String(seedIndex).padStart(2,'0')}${String(candidateIndex).padStart(9,'0')}`,
+    play_count:0,
+    liked_count:0,
+    source:'favorite_discovery',
+    discovery_seeds:[{track_key:seed.track_key,title:seed.title,seed_kind:'most_listened',play_count:10,liked:false,expires_at:expiry}],
+  })));
+  const result=rankTracks([...seeds,...candidates],new Set(),12,Date.now(),{unheardOnly:true});
+  const counts=Object.fromEntries(seeds.map(seed=>[seed.title,result.filter(item=>item.reasons.join(' ').includes(seed.title)).length]));
+  assert.equal(result.length,12);
+  assert.deepEqual(counts,Object.fromEntries(seeds.map(seed=>[seed.title,2])));
+  assert.match(result[0].reasons[0],/Taste root 0/);
+});
+
 test('hosted fresh mix keeps candidates from rotated listening seeds', async () => {
   const env={DB:database()};
   const request=(path,body)=>worker.fetch(new Request(`https://rotated.chatgpt.site${path}`,{

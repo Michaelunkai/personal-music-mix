@@ -220,10 +220,39 @@ class ScanManager:
         ingestion['overview'] = self.database.overview()
         related: list[TrackRecord] = []
         if include_related and self.settings.ytmusicapi_headers_path:
-            for row in self.database.list_track_stats(limit=5):
+            # Query several distinct taste roots instead of asking the
+            # provider only about the single most-played song. Favorites get
+            # priority, then the strongest listening-history roots fill the
+            # remaining bounded requests. Keep the root on each result so the
+            # recommender can interleave the resulting candidate groups.
+            stats = self.database.list_track_stats(limit=10_000)
+            liked_rows = [
+                row for row in stats
+                if row.get('local_favorite')
+                or row.get('liked_count', 0) > 0
+                or row.get('like_events', 0) > 0
+            ]
+            listened_rows = [row for row in stats if row not in liked_rows]
+            selected_rows: list[dict[str, Any]] = []
+            selected_keys: set[str] = set()
+            for row in [*liked_rows[:6], *listened_rows]:
+                key = str(row.get('track_key') or '')
+                if not key or key in selected_keys:
+                    continue
+                selected_rows.append(row)
+                selected_keys.add(key)
+                if len(selected_rows) >= 12:
+                    break
+            for row in selected_rows:
                 seed = _track_from_row(row)
                 if seed:
-                    related.extend(self.api_connector.related(seed, limit=5).items)
+                    result = self.api_connector.related(seed, limit=5)
+                    for item in result.items:
+                        metadata = dict(item.metadata or {})
+                        metadata['discovery_seed_key'] = str(seed.track_key)
+                        metadata['discovery_seed_title'] = seed.title
+                        metadata['discovery_seed_kind'] = 'favorite' if row in liked_rows else 'most_listened'
+                        related.append(replace(item, metadata=metadata))
         recommendations = self.engine.recommend(
             self.database.list_track_stats(limit=10000),
             related_candidates=related,
