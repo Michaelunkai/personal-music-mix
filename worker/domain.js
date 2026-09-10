@@ -88,7 +88,7 @@ function historyOrderScore(value) {
 
 function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
   const byKey = new Map(rows.map(row => [row.track_key, row]));
-  const seedRows = rows.filter(row => (Number(row.play_count) > 0 || liked(row, favorites)) && playable(row));
+  const seedRows = rows.filter(row => (Number(row.play_count) > 0 || hasPlayedEvidence(row.latest_played_at) || liked(row, favorites)) && playable(row));
   const favoriteSeeds = seedRows.filter(row => liked(row, favorites))
     .sort((a,b) => Number(b.liked_count || 0) - Number(a.liked_count || 0)
       || Number(b.like_events || 0) - Number(a.like_events || 0)
@@ -122,13 +122,24 @@ function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
   const seedFor = row => (Array.isArray(row.discovery_seeds) ? row.discovery_seeds : [])
     .filter(seed => active.has(seed.track_key))
     .map(seed => ({...seed, source:byKey.get(seed.track_key)}))
-    .map(seed => ({...seed,
-      title:String(seed.title || seed.source?.title || 'a song you enjoy'),
-      play_count:Number(seed.play_count ?? seed.source?.play_count ?? 0),
-      liked:Boolean(seed.liked ?? liked(seed.source || {}, favorites)),
-      seed_kind:seed.seed_kind === 'most_listened' ? 'most_listened' : (seed.seed_kind || (seed.liked ? 'favorite' : 'most_listened')),
-      history_position:Number.isFinite(Number(seed.history_position)) ? Number(seed.history_position) : historyPosition(seed.source),
-    }))
+    .map(seed => {
+      // The imported row is the current source of truth. Discovery metadata
+      // is retained for lineage/reason text, but must not resurrect a stale
+      // like, play count, or history position after the bridge updates it.
+      const source = seed.source;
+      const currentLiked = source ? liked(source, favorites) : Boolean(seed.liked);
+      const currentPlayCount = source ? Number(source.play_count || 0) : Number(seed.play_count || 0);
+      const currentHistoryPosition = source && Number.isFinite(Number(source.history_position))
+        ? Number(source.history_position)
+        : Number.isFinite(Number(seed.history_position)) ? Number(seed.history_position) : historyPosition(source);
+      return {...seed,
+        title:String(source?.title || seed.title || 'a song you enjoy'),
+        play_count:currentPlayCount,
+        liked:currentLiked,
+        seed_kind:currentLiked ? 'favorite' : 'most_listened',
+        history_position:currentHistoryPosition,
+      };
+    })
     .sort((a,b) => Number(scoringSeedKeys.has(a.track_key)) - Number(scoringSeedKeys.has(b.track_key))
       || Number(b.liked) - Number(a.liked)
       || Number(b.play_count || 0) - Number(a.play_count || 0)

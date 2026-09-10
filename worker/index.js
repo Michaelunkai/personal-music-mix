@@ -16,18 +16,20 @@ const trackKey = item => String(item?.track?.track_key || item?.track_key || '')
 const trackVideoId = item => String(item?.track?.video_id || item?.video_id || '');
 const playableVideoId = value => /^[A-Za-z0-9_-]{11}$/.test(String(value || ''));
 const activeItem = (item, rowsByKey, favorites, nowMs = Date.now()) => {
-  const track = item?.track || item || {};
-  const row = rowsByKey.get(track.track_key) || track;
+  const storedTrack = item?.track || item || {};
+  const currentRow = rowsByKey.get(storedTrack.track_key);
+  if (!currentRow) return false;
+  const track = currentRow;
+  const row = currentRow;
   const liked = favorites.has(track.track_key) || Number(row.liked_count) > 0 || Number(row.like_events) > 0 || Boolean(row.local_favorite);
   const played = Number(row.play_count || 0) > 0 || (row.latest_played_at !== null && row.latest_played_at !== undefined && String(row.latest_played_at).trim() !== '');
   const playable = playableVideoId(track.video_id);
-  const freshSource = item?.source === 'favorite_discovery' || item?.source === 'related' || row.source === 'favorite_discovery' || row.source === 'related';
+  const freshSource = row.source === 'favorite_discovery' || row.source === 'related';
   const seeds = Array.isArray(row.discovery_seeds) ? row.discovery_seeds : [];
-  const related = item?.source === 'related' || row.source === 'related';
+  const related = row.source === 'related';
   const seedBackfill = seeds.some(seed => {
     const source = rowsByKey.get(seed.track_key);
-    return Boolean(source && (Number(source.play_count) > 0 || favorites.has(seed.track_key) || Number(source.liked_count) > 0 || Number(source.like_events) > 0 || Boolean(source.local_favorite)))
-      || Number(seed.play_count) > 0 || Boolean(seed.liked);
+    return Boolean(source && (Number(source.play_count) > 0 || (source.latest_played_at !== null && source.latest_played_at !== undefined && String(source.latest_played_at).trim() !== '') || favorites.has(seed.track_key) || Number(source.liked_count) > 0 || Number(source.like_events) > 0 || Boolean(source.local_favorite)));
   });
   return freshSource && !played && !liked && playable && (related || seedBackfill);
 };
@@ -91,14 +93,22 @@ async function recordServedKeys(db, keys, rows = []) {
 }
 async function currentFreshItems(db, rows, favorites, fallback = []) {
   const rowsByKey = new Map(rows.map(row => [row.track_key, row]));
+  const seenKeys = new Set();
   const seenVideoIds = new Set();
-  return (Array.isArray(fallback) ? fallback : []).filter(item => {
-    if (!activeItem(item, rowsByKey, favorites)) return false;
-    const videoId = trackVideoId(item);
-    if (seenVideoIds.has(videoId)) return false;
+  return (Array.isArray(fallback) ? fallback : []).reduce((items, item) => {
+    const storedTrack = item?.track || item || {};
+    const currentRow = rowsByKey.get(storedTrack.track_key);
+    if (!currentRow) return items;
+    const effective = item?.track ? {...item, track:currentRow} : {track:currentRow};
+    if (!activeItem(effective, rowsByKey, favorites)) return items;
+    const key = trackKey(effective);
+    const videoId = trackVideoId(effective);
+    if (!key || seenKeys.has(key) || seenVideoIds.has(videoId)) return items;
+    seenKeys.add(key);
     seenVideoIds.add(videoId);
-    return true;
-  });
+    items.push(effective);
+    return items;
+  }, []);
 }
 async function library(db) {
   const [tracks,favorites] = await Promise.all([
@@ -124,9 +134,25 @@ async function withDatabaseLock(db, work) {
 async function rebuildUnlocked(db) {
   const {rows,favorites} = await library(db);
   if (!rows.length) return {status:'failed',run:{message:'No listening history is available yet. Connect the local bridge first.'}};
+  const previous = await readState(db,'runs') || [];
+  const storedRecommendations = await readState(db,'recommendations');
+  const previousRecommendations = Array.isArray(storedRecommendations) ? storedRecommendations : [];
+  const oldPlan = await readState(db,'playlist');
+  // Legacy deployments may have persisted only the playlist tracks. Treat
+  // either representation as visible history so a replacement cannot repeat
+  // a song merely because its old served ledger is incomplete.
+  const previousVisibleItems = previousRecommendations.length
+    ? previousRecommendations
+    : (Array.isArray(oldPlan?.items) ? oldPlan.items : []);
+  const previousKeys = new Set(previousVisibleItems.map(trackKey).filter(Boolean));
+  const previousVideos = new Set(previousVisibleItems.map(trackVideoId).filter(playableVideoId));
+  const freshExclusions = currentServed => ({
+    excludeKeys:new Set([...currentServed.keys, ...previousKeys]),
+    excludeVideoIds:new Set([...currentServed.videos, ...previousVideos]),
+  });
   await db.prepare("DELETE FROM music_served WHERE reservation_id IS NOT NULL AND julianday(served_at) < julianday('now','-15 minutes')").run();
   let served = await servedLedger(db,rows);
-  let rankedItems = rankTracks(rows,favorites,FRESH_MIX_LIMIT,Date.now(),{unheardOnly:true,excludeKeys:served.keys,excludeVideoIds:served.videos});
+  let rankedItems = rankTracks(rows,favorites,FRESH_MIX_LIMIT,Date.now(),{unheardOnly:true,...freshExclusions(served)});
   // The durable unique video index is the reservation boundary.  It closes
   // the race where two refreshes read the same served set before either one
   // writes its next visible batch.
@@ -137,20 +163,17 @@ async function rebuildUnlocked(db) {
   // empty batch that discarded still-available candidates.
   if (!reservation.items.length && rankedItems.length) {
     served = await servedLedger(db,rows);
-    rankedItems = rankTracks(rows,favorites,FRESH_MIX_LIMIT,Date.now(),{unheardOnly:true,excludeKeys:served.keys,excludeVideoIds:served.videos});
+    rankedItems = rankTracks(rows,favorites,FRESH_MIX_LIMIT,Date.now(),{unheardOnly:true,...freshExclusions(served)});
     reservation = await reserveFreshItems(db,rankedItems);
   }
   const freshItems = reservation.items;
-  const previous = await readState(db,'runs') || [];
-  const previousRecommendations = await readState(db,'recommendations') || [];
-  const oldPlan = await readState(db,'playlist');
   // A provider can deliver a partial discovery response while the local
   // bridge is still expanding its frontier. Never let that partial response
   // displace an already complete visible mix: doing so creates a moment where
   // the dashboard shows fewer than the requested fifty songs. Release the
   // reservation so those partial candidates remain available for the next
   // complete replacement attempt.
-  const preservedItems = await currentFreshItems(db,rows,favorites,previousRecommendations);
+  const preservedItems = await currentFreshItems(db,rows,favorites,previousVisibleItems);
   if (freshItems.length < FRESH_MIX_LIMIT && preservedItems.length >= FRESH_MIX_LIMIT) {
     await releaseReservation(db,reservation.reservationId);
     const preservedPlan = {
@@ -170,7 +193,7 @@ async function rebuildUnlocked(db) {
     return {status:'completed',run,recommendations:preservedItems,playlist_preview:preservedPlan,preserved_previous_mix:true,available_new_items:freshItems.length,target_count:FRESH_MIX_LIMIT};
   }
   const visibleItems = freshItems;
-  const nextServed = mergeKeys([...served.keys], freshItems.map(item => trackKey(item)).filter(Boolean));
+  const nextServed = mergeKeys([...served.keys, ...previousKeys], freshItems.map(item => trackKey(item)).filter(Boolean));
   const run = {run_id:crypto.randomUUID(),status:'completed',items_seen:rows.length,finished_at:now(),message:freshItems.length
     ? `Fresh mix built from your most-listened songs and favorites; ${freshItems.length} songs are new to your listening history.`
     : 'No new unseen songs are available yet. Refresh requested another provider discovery batch.'};

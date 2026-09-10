@@ -1,5 +1,7 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { latestPlan: null, schedulerRunning: false, recommendations: [], mixRecommendations: [], ranked: [], library: [], view: 'mix', query: '', favorites: new Set(), favoritesReady:false, queue: [], queueIndex: 0, player: null, playerReady: null, playerLoading: false, refreshing: false };
+const PLAYER_QUEUE_STORAGE_KEY = "ytmusic-personal-mix-player-v1";
+const PLAYER_QUEUE_STORAGE_VERSION = 1;
+const state = { latestPlan: null, schedulerRunning: false, recommendations: [], mixRecommendations: [], ranked: [], library: [], view: 'mix', query: '', favorites: new Set(), favoritesReady:false, queue: [], queueIndex: 0, player: null, playerReady: null, playerLoading: false, refreshing: false, playbackState: 'idle', restoredPosition: 0, queueRestored: false, playedTrackKeys: new Set(), playbackControlsReady: false, pauseButton: null, stopButton: null, mediaSessionInstalled: false, positionTimer: null, lastPositionPersistedAt: 0, lastEndedIndex: null, stopRequested: false, pauseRequested: false, playerNeedsLoad: false };
 
 function toast(message) {
   const node = $("#toast");
@@ -7,6 +9,99 @@ function toast(message) {
   node.classList.add("show");
   window.clearTimeout(toast.timer);
   toast.timer = window.setTimeout(() => node.classList.remove("show"), 3800);
+}
+
+function setPlayerStatus(message) {
+  const node = $("#player-status");
+  if (node) node.textContent = message;
+}
+
+function getPersistentStorage() {
+  try {
+    const storage = window.localStorage || (typeof localStorage !== "undefined" ? localStorage : null);
+    return storage && typeof storage.getItem === "function" && typeof storage.setItem === "function" ? storage : null;
+  } catch { return null; }
+}
+
+function finiteNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function clampQueueIndex(index, length) {
+  if (!length) return 0;
+  return Math.min(length - 1, Math.max(0, Math.floor(finiteNumber(index, 0))));
+}
+
+function getTrackKey(track) {
+  const id = videoId(track || {});
+  return track?.track_key || (id ? `video:${id}` : "");
+}
+
+function snapshotTrack(track) {
+  if (!track || typeof track !== "object") return null;
+  const id = videoId(track);
+  if (!id) return null;
+  return {
+    track_key: String(track.track_key || `video:${id}`),
+    video_id: id,
+    title: String(track.title || "Untitled"),
+    artist: String(track.artist || "Unknown artist"),
+    album: track.album ? String(track.album) : "",
+    url: String(track.url || track.canonical_url || `https://music.youtube.com/watch?v=${id}`),
+    thumbnail: String(track.thumbnail || track.thumbnail_url || track.artwork_url || ""),
+  };
+}
+
+function currentPlayerTime() {
+  try {
+    return state.player && typeof state.player.getCurrentTime === "function" ? Math.max(0, finiteNumber(state.player.getCurrentTime(), 0)) : 0;
+  } catch { return 0; }
+}
+
+function persistQueue() {
+  const storage = getPersistentStorage();
+  const queue = state.queue.map(snapshotTrack).filter(Boolean);
+  if (!storage || !queue.length) return false;
+  try {
+    storage.setItem(PLAYER_QUEUE_STORAGE_KEY, JSON.stringify({
+      version: PLAYER_QUEUE_STORAGE_VERSION,
+      queue,
+      queueIndex: clampQueueIndex(state.queueIndex, queue.length),
+      currentTime: currentPlayerTime(),
+      playbackState: state.playbackState,
+      playedTrackKeys: Array.from(state.playedTrackKeys || []).slice(-5000),
+      savedAt: Date.now(),
+    }));
+    state.lastPositionPersistedAt = Date.now();
+    return true;
+  } catch { return false; }
+}
+
+function restoreQueue() {
+  const storage = getPersistentStorage();
+  if (!storage) return false;
+  let saved;
+  try { saved = JSON.parse(storage.getItem(PLAYER_QUEUE_STORAGE_KEY) || "null"); } catch { return false; }
+  if (!saved || (saved.version && saved.version !== PLAYER_QUEUE_STORAGE_VERSION) || !Array.isArray(saved.queue)) return false;
+  const queue = saved.queue.map(snapshotTrack).filter(Boolean);
+  if (!queue.length) return false;
+  // Reuse the page's current array realm when one exists. Besides keeping the
+  // queue plain and serializable, this avoids cross-realm collection quirks in
+  // embedded test hosts while remaining a normal browser array in production.
+  const queueContainer = Array.isArray(state.recommendations) ? state.recommendations.slice(0, 0) : [];
+  queueContainer.push(...queue);
+  state.queue = queueContainer;
+  state.queueIndex = clampQueueIndex(saved.queueIndex, queue.length);
+  state.restoredPosition = Math.max(0, finiteNumber(saved.currentTime, 0));
+  state.playedTrackKeys = new Set(Array.isArray(saved.playedTrackKeys) ? saved.playedTrackKeys.filter(Boolean) : []);
+  state.queueRestored = true;
+  state.stopRequested = false;
+  state.pauseRequested = false;
+  state.playbackState = saved.playbackState === "stopped" ? "stopped" : "paused";
+  updatePlayingInfo();
+  setPlayerStatus("Queue restored. Press Resume to continue playback.");
+  return true;
 }
 
 async function api(path, options = {}) {
@@ -99,6 +194,18 @@ function renderConnection(data) {
 
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (char) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "'":"&#39;", '"':"&quot;" }[char])); }
 
+function applyFreshRecommendations(items) {
+  const next = Array.isArray(items) ? items.slice() : [];
+  const current = state.mixRecommendations.length ? state.mixRecommendations : state.ranked;
+  // A background/visibility refresh must not make a complete fresh mix look
+  // empty or partial while the provider is still expanding it. The active
+  // player queue is separate state and is never rebuilt by this helper.
+  if (current.length >= 50 && next.length < 50) return false;
+  state.ranked = next;
+  state.mixRecommendations = next.slice();
+  return true;
+}
+
 async function refresh({ silent = false } = {}) {
   // A save during an older poll must await a fresh response after that poll.
   state.refreshRequested = true;
@@ -111,13 +218,7 @@ async function refresh({ silent = false } = {}) {
       const [health, overview, recs, runs, status, latestPlaylist, connection, favorites, library] = results.map(result => result.status === 'fulfilled' ? result.value : null);
       state.favoritesReady = Boolean(favorites);
       if (favorites) state.favorites = new Set(favorites.track_keys || []);
-      if (recs) {
-        state.ranked = recs.items || [];
-        // The fresh mix is independent of the current library/favorites view.
-        // Keep Play mix pointed at the latest server batch even when refresh
-        // runs while the user is browsing another collection.
-        state.mixRecommendations = state.ranked.slice();
-      }
+      if (recs) applyFreshRecommendations(recs.items);
       if (library) state.library = library.items || [];
       renderHealth(health || {ok:false});
       if (overview) renderOverview(overview);
@@ -198,13 +299,11 @@ async function scan() {
     const bridge = await requestBridgeRefresh();
     const result = await api("/api/scan", { method: "POST", body: JSON.stringify({ include_related: true }) });
     if (["failed", "blocked"].includes(result.status)) throw new Error(result.message || result.run?.message || "Mix could not be refreshed");
-    if (Array.isArray(result.recommendations)) {
+    if (Array.isArray(result.recommendations) && applyFreshRecommendations(result.recommendations)) {
       // Consume the authoritative scan response immediately.  The hosted
       // worker returns the existing complete mix when a provider response is
       // partial, so the page never drops below the fifty-song target while
       // discovery is still expanding.
-      state.ranked = result.recommendations.slice();
-      state.mixRecommendations = state.ranked.slice();
       renderCollection();
     }
     // A live bridge acknowledgement or a public discovery request means the
@@ -263,15 +362,190 @@ function videoId(track) {
   } catch { return null; }
 }
 
+function getMediaSession() {
+  try { return window.navigator?.mediaSession || (typeof navigator !== "undefined" ? navigator.mediaSession : null) || null; } catch { return null; }
+}
+
+function setMediaSessionPlaybackState(playbackState) {
+  const mediaSession = getMediaSession();
+  if (!mediaSession) return;
+  try { mediaSession.playbackState = playbackState; } catch { /* optional browser API */ }
+}
+
+function updateMediaSessionMetadata(track) {
+  const mediaSession = getMediaSession();
+  const Metadata = window.MediaMetadata || (typeof MediaMetadata === "function" ? MediaMetadata : null);
+  if (!mediaSession || typeof Metadata !== "function" || !track) return;
+  const artworkSource = track.thumbnail || track.thumbnail_url || track.artwork_url || (() => {
+    const id = videoId(track);
+    return id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : "";
+  })();
+  const metadata = {
+    title: String(track.title || "Untitled"),
+    artist: String(track.artist || "Unknown artist"),
+    album: String(track.album || "Personal mix"),
+  };
+  if (artworkSource) metadata.artwork = [{ src: String(artworkSource) }];
+  try { mediaSession.metadata = new Metadata(metadata); } catch { /* optional browser API */ }
+}
+
+function updateMediaSessionPosition() {
+  const mediaSession = getMediaSession();
+  const player = state.player;
+  if (!mediaSession || typeof mediaSession.setPositionState !== "function" || !player || typeof player.getDuration !== "function" || typeof player.getCurrentTime !== "function") return;
+  let duration;
+  let currentTime;
+  let playbackRate = 1;
+  try {
+    duration = finiteNumber(player.getDuration(), 0);
+    currentTime = finiteNumber(player.getCurrentTime(), 0);
+    if (typeof player.getPlaybackRate === "function") playbackRate = finiteNumber(player.getPlaybackRate(), 1);
+  } catch { return; }
+  if (!(duration > 0)) return;
+  const position = Math.min(duration, Math.max(0, currentTime));
+  try { mediaSession.setPositionState({ duration, position, playbackRate: playbackRate > 0 ? playbackRate : 1 }); } catch { /* duration can race player readiness */ }
+}
+
+function startPositionUpdates() {
+  if (state.positionTimer !== null || typeof window.setInterval !== "function") return;
+  state.positionTimer = window.setInterval(() => {
+    if (!['playing', 'buffering'].includes(state.playbackState)) return stopPositionUpdates();
+    updateMediaSessionPosition();
+    if (Date.now() - state.lastPositionPersistedAt >= 5000) persistQueue();
+  }, 1000);
+}
+
+function stopPositionUpdates() {
+  if (state.positionTimer === null) return;
+  if (typeof window.clearInterval === "function") window.clearInterval(state.positionTimer);
+  state.positionTimer = null;
+}
+
+function seekPlayback(offsetOrPosition, { relative = false, fastSeek = false } = {}) {
+  const player = state.player;
+  if (!player || typeof player.seekTo !== "function" || typeof player.getDuration !== "function") {
+    setPlayerStatus("Seeking is available after the song is ready.");
+    return false;
+  }
+  let duration;
+  let current;
+  try {
+    duration = finiteNumber(player.getDuration(), 0);
+    current = typeof player.getCurrentTime === "function" ? finiteNumber(player.getCurrentTime(), 0) : 0;
+  } catch {
+    setPlayerStatus("Seeking is available after the song is ready.");
+    return false;
+  }
+  if (!(duration > 0)) {
+    setPlayerStatus("Seeking is available after the song is ready.");
+    return false;
+  }
+  const requested = finiteNumber(offsetOrPosition, NaN);
+  if (!Number.isFinite(requested)) return false;
+  const position = Math.min(duration, Math.max(0, relative ? current + requested : requested));
+  try {
+    player.seekTo(position, Boolean(fastSeek));
+    state.restoredPosition = position;
+    persistQueue();
+    updateMediaSessionPosition();
+    setPlayerStatus(`Seeking to ${Math.floor(position)} seconds.`);
+    return true;
+  } catch {
+    setPlayerStatus("Seeking is unavailable for this song.");
+    return false;
+  }
+}
+
+function installMediaSessionHandlers() {
+  const mediaSession = getMediaSession();
+  if (!mediaSession || typeof mediaSession.setActionHandler !== "function") return false;
+  const handlers = {
+    play: () => resumePlayback(),
+    pause: () => pausePlayback(),
+    stop: () => stopPlayback(),
+    nexttrack: () => changeTrack(1),
+    previoustrack: () => changeTrack(-1),
+    seekbackward: details => seekPlayback(-Math.max(1, finiteNumber(details?.seekOffset, 10)), { relative: true }),
+    seekforward: details => seekPlayback(Math.max(1, finiteNumber(details?.seekOffset, 10)), { relative: true }),
+    seekto: details => {
+      const seekTime = Number(details?.seekTime);
+      return Number.isFinite(seekTime) ? seekPlayback(seekTime, { fastSeek: Boolean(details?.fastSeek) }) : false;
+    },
+  };
+  Object.entries(handlers).forEach(([action, handler]) => {
+    try { mediaSession.setActionHandler(action, handler); } catch { /* unsupported action on this browser */ }
+  });
+  state.mediaSessionInstalled = true;
+  return true;
+}
+
+function updatePlaybackControls() {
+  const hasQueue = state.queue.length > 0;
+  const previous = $("#previous-track");
+  const next = $("#next-track");
+  if (previous) previous.disabled = !hasQueue || state.queueIndex <= 0;
+  if (next) next.disabled = !hasQueue || state.queueIndex >= state.queue.length - 1;
+  const active = ['playing', 'loading', 'buffering'].includes(state.playbackState);
+  const pauseButton = state.pauseButton || $("#pause-track") || $("#pause-resume") || $("#pause-button") || $("#player-pause");
+  if (pauseButton) {
+    pauseButton.disabled = !hasQueue;
+    pauseButton.textContent = active ? "Pause" : (hasQueue ? "Resume" : "Play");
+    pauseButton.dataset.action = active ? "pause" : "resume";
+    pauseButton.dataset.playbackAction = active ? "pause" : "resume";
+    pauseButton.setAttribute?.("aria-label", active ? "Pause playback" : (hasQueue ? "Resume playback" : "Play current song"));
+    pauseButton.setAttribute?.("aria-pressed", String(active));
+  }
+  const stopButton = state.stopButton || $("#stop-track") || $("#stop-playback") || $("#stop-button") || $("#player-stop");
+  if (stopButton) {
+    stopButton.disabled = !hasQueue || state.playbackState === "idle";
+    stopButton.dataset.playbackAction = "stop";
+  }
+}
+
+function ensurePlaybackControls() {
+  if (state.playbackControlsReady) return;
+  const container = document.querySelector(".player-actions");
+  if (!container) return;
+  const canCreate = typeof document.createElement === "function" && typeof container.appendChild === "function";
+  let pauseButton = document.querySelector("#pause-track") || document.querySelector("#pause-resume") || document.querySelector("#pause-button") || document.querySelector("#player-pause");
+  let stopButton = document.querySelector("#stop-track") || document.querySelector("#stop-playback") || document.querySelector("#stop-button") || document.querySelector("#player-stop");
+  if (!pauseButton && canCreate) {
+    pauseButton = document.createElement("button");
+    pauseButton.type = "button";
+    pauseButton.id = "pause-resume";
+    pauseButton.className = "secondary";
+    pauseButton.textContent = "Resume";
+    container.appendChild(pauseButton);
+  }
+  if (!stopButton && canCreate) {
+    stopButton = document.createElement("button");
+    stopButton.type = "button";
+    stopButton.id = "stop-playback";
+    stopButton.className = "secondary";
+    stopButton.textContent = "Stop";
+    container.appendChild(stopButton);
+  }
+  if (!pauseButton && !stopButton) return;
+  state.pauseButton = pauseButton;
+  state.stopButton = stopButton;
+  if (pauseButton && typeof pauseButton.addEventListener === "function") pauseButton.addEventListener("click", () => {
+    if (['playing', 'loading', 'buffering'].includes(state.playbackState)) pausePlayback();
+    else resumePlayback();
+  });
+  if (stopButton && typeof stopButton.addEventListener === "function") stopButton.addEventListener("click", stopPlayback);
+  state.playbackControlsReady = true;
+  updatePlaybackControls();
+}
+
 function updatePlayingInfo() {
   const track = state.queue[state.queueIndex];
-  if (!track) return;
+  if (!track) { updatePlaybackControls(); return; }
   $("#now-playing").textContent = `${track.title} — ${track.artist || "Unknown artist"}`;
   const link = $("#open-playing");
   link.href = `https://music.youtube.com/watch?v=${videoId(track)}`;
   link.hidden = false;
-  $("#previous-track").disabled = state.queueIndex <= 0;
-  $("#next-track").disabled = state.queueIndex >= state.queue.length - 1;
+  updateMediaSessionMetadata(track);
+  updatePlaybackControls();
 }
 
 function loadYouTubeAPI() {
@@ -297,28 +571,225 @@ async function ensurePlayer() {
       width: "100%", height: "360",
       playerVars: { controls: 1, playsinline: 1, origin: window.location.origin },
       events: {
-        onReady: () => { window.clearTimeout(timer); resolve(state.player); },
+        onReady: () => {
+          window.clearTimeout(timer);
+          try { state.player?.getIframe?.()?.setAttribute?.("allow", "autoplay; encrypted-media; picture-in-picture; fullscreen"); } catch { /* optional iframe surface */ }
+          updatePlaybackControls();
+          resolve(state.player);
+        },
         onStateChange: event => {
-          const index = state.player.getPlaylistIndex();
+          const index = getPlayerPlaylistIndex();
           if (Number.isInteger(index) && index >= 0 && index < state.queue.length) { state.queueIndex = index; updatePlayingInfo(); }
           const statuses = { 0: "Song ended.", 1: "Playing", 2: "Paused", 3: "Buffering…", 5: "Ready. Press play in the YouTube player." };
-          $("#player-status").textContent = statuses[event.data] || "Press play in the YouTube player to listen.";
+          if (event.data === 0) return handlePlaybackEnded();
+          if (event.data === 1) {
+            if (state.stopRequested) {
+              if (typeof state.player?.stopVideo === "function") state.player.stopVideo();
+              return;
+            }
+            if (state.pauseRequested) {
+              if (typeof state.player?.pauseVideo === "function") state.player.pauseVideo();
+              state.playbackState = "paused";
+              stopPositionUpdates();
+              setMediaSessionPlaybackState("paused");
+              persistQueue();
+              setPlayerStatus("Paused. Press Resume to continue.");
+              updatePlaybackControls();
+              return;
+            }
+            state.playbackState = "playing";
+            state.lastEndedIndex = null;
+            state.restoredPosition = 0;
+            markTrackPlayed();
+            setMediaSessionPlaybackState("playing");
+            startPositionUpdates();
+            persistQueue();
+          } else if (event.data === 2) {
+            if (state.stopRequested) return;
+            state.playbackState = "paused";
+            state.restoredPosition = currentPlayerTime();
+            stopPositionUpdates();
+            setMediaSessionPlaybackState("paused");
+            persistQueue();
+          } else if (event.data === 3) {
+            if (!state.stopRequested) {
+              state.playbackState = "buffering";
+              setMediaSessionPlaybackState("playing");
+              startPositionUpdates();
+            }
+          } else if (event.data === 5 && !state.stopRequested) {
+            if (state.playbackState === "loading") state.playbackState = "paused";
+            setMediaSessionPlaybackState("paused");
+          }
+          setPlayerStatus(statuses[event.data] || "Press play in the YouTube player to listen.");
+          updatePlaybackControls();
         },
-        onAutoplayBlocked: () => { $("#player-status").textContent = "Your browser paused autoplay. Press play inside the YouTube player."; },
+        onAutoplayBlocked: () => {
+          state.playbackState = "paused";
+          stopPositionUpdates();
+          setMediaSessionPlaybackState("paused");
+          setPlayerStatus("Your browser paused autoplay. Press play inside the YouTube player or use Resume.");
+          updatePlaybackControls();
+        },
         onError: event => {
           const restricted = [100, 101, 150].includes(event.data);
-          $("#player-status").textContent = restricted
+          state.playbackState = "paused";
+          stopPositionUpdates();
+          setMediaSessionPlaybackState("none");
+          setPlayerStatus(restricted
             ? "YouTube cannot play this song here. Choose Next or open it in YouTube Music."
-            : `YouTube playback failed (${event.data}). Try Next or open the song in YouTube Music.`;
+            : `YouTube playback failed (${event.data}). Try Next or open the song in YouTube Music.`);
+          updatePlaybackControls();
         },
       },
     });
   }).catch(error => {
-    state.player?.destroy(); state.player = null; state.playerReady = null;
+    if (typeof state.player?.destroy === "function") state.player.destroy();
+    state.player = null; state.playerReady = null; state.playerNeedsLoad = true;
     $("#player-frame").innerHTML = '<div id="youtube-player"></div>';
     throw error;
   });
   return state.playerReady;
+}
+
+function getPlayerPlaylistIndex() {
+  try {
+    const index = state.player && typeof state.player.getPlaylistIndex === "function" ? state.player.getPlaylistIndex() : state.queueIndex;
+    return Number.isInteger(index) && index >= 0 ? index : state.queueIndex;
+  } catch { return state.queueIndex; }
+}
+
+function markTrackPlayed() {
+  const key = getTrackKey(state.queue[state.queueIndex]);
+  if (key) state.playedTrackKeys.add(key);
+}
+
+function handlePlaybackEnded() {
+  stopPositionUpdates();
+  const endedIndex = getPlayerPlaylistIndex();
+  if (state.lastEndedIndex === endedIndex && ['loading', 'playing', 'ended', 'stopped'].includes(state.playbackState)) return;
+  state.lastEndedIndex = endedIndex;
+  if (Number.isInteger(endedIndex) && endedIndex >= 0 && endedIndex < state.queue.length) state.queueIndex = endedIndex;
+  markTrackPlayed();
+  if (state.stopRequested) {
+    state.playbackState = "stopped";
+    setMediaSessionPlaybackState("none");
+    setPlayerStatus("Playback stopped. Press Resume to continue this queue.");
+    persistQueue();
+    updatePlayingInfo();
+    return;
+  }
+  const nextIndex = state.queueIndex + 1;
+  if (nextIndex < state.queue.length && state.player && typeof state.player.playVideoAt === "function") {
+    state.queueIndex = nextIndex;
+    state.playbackState = "loading";
+    state.restoredPosition = 0;
+    state.pauseRequested = false;
+    updatePlayingInfo();
+    setPlayerStatus("Playing next song…");
+    try {
+      state.player.playVideoAt(nextIndex);
+      state.playbackState = "playing";
+      setMediaSessionPlaybackState("playing");
+      startPositionUpdates();
+      persistQueue();
+      updatePlaybackControls();
+    } catch {
+      state.playbackState = "paused";
+      stopPositionUpdates();
+      setMediaSessionPlaybackState("paused");
+      setPlayerStatus("The next song could not start. Press Resume or choose Next.");
+      updatePlaybackControls();
+    }
+    return;
+  }
+  state.playbackState = "ended";
+  state.restoredPosition = 0;
+  setMediaSessionPlaybackState("none");
+  updatePlayingInfo();
+  setPlayerStatus("End of queue. Refresh mix for more unseen songs; served songs will not be recycled.");
+  persistQueue();
+}
+
+async function resumePlayback() {
+  if (!state.queue.length) {
+    setPlayerStatus("Choose Play on a song, or play the whole mix.");
+    return false;
+  }
+  const hadPlayer = Boolean(state.player);
+  const savedPosition = state.restoredPosition;
+  state.stopRequested = false;
+  state.pauseRequested = false;
+  state.lastEndedIndex = null;
+  state.playbackState = "loading";
+  setPlayerStatus("Resuming playback…");
+  updatePlaybackControls();
+  try {
+    const player = await ensurePlayer();
+    const needsPlaylist = !hadPlayer || state.queueRestored || state.playerNeedsLoad;
+    if (needsPlaylist) {
+      player.loadPlaylist(state.queue.map(videoId), state.queueIndex);
+      state.queueRestored = false;
+      state.playerNeedsLoad = false;
+    } else if (typeof player.playVideo === "function") {
+      player.playVideo();
+    }
+    if (savedPosition > 0 && typeof player.seekTo === "function") player.seekTo(savedPosition, true);
+    state.restoredPosition = 0;
+    persistQueue();
+    setPlayerStatus("Starting song… If playback pauses, press play inside the player.");
+    updatePlaybackControls();
+    return true;
+  } catch (error) {
+    state.playbackState = "paused";
+    setPlayerStatus(error.message);
+    updatePlaybackControls();
+    return false;
+  }
+}
+
+function pausePlayback() {
+  if (!state.queue.length) {
+    setPlayerStatus("There is no active queue to pause.");
+    return false;
+  }
+  state.pauseRequested = true;
+  state.stopRequested = false;
+  if (state.player && typeof state.player.pauseVideo === "function") {
+    try { state.player.pauseVideo(); } catch { /* player may be between iframe states */ }
+  }
+  state.playbackState = "paused";
+  state.restoredPosition = currentPlayerTime();
+  stopPositionUpdates();
+  setMediaSessionPlaybackState("paused");
+  persistQueue();
+  setPlayerStatus("Paused. Press Resume to continue.");
+  updatePlaybackControls();
+  return true;
+}
+
+function stopPlayback() {
+  if (!state.queue.length) {
+    setPlayerStatus("There is no active playback to stop.");
+    return false;
+  }
+  state.stopRequested = true;
+  state.pauseRequested = false;
+  if (state.player) {
+    try {
+      if (typeof state.player.stopVideo === "function") state.player.stopVideo();
+      else if (typeof state.player.pauseVideo === "function") state.player.pauseVideo();
+    } catch { /* player may already be unloading */ }
+  }
+  state.playbackState = "stopped";
+  state.restoredPosition = 0;
+  state.playerNeedsLoad = true;
+  stopPositionUpdates();
+  setMediaSessionPlaybackState("none");
+  persistQueue();
+  setPlayerStatus("Playback stopped. Press Resume to continue this queue.");
+  updatePlaybackControls();
+  return true;
 }
 
 async function playTrack(index) {
@@ -331,14 +802,31 @@ async function playTrackFrom(items, index) {
   state.queue = items.map(item => item.track).filter(track => videoId(track));
   state.queueIndex = Math.max(0, state.queue.findIndex(track => track.track_key === selected?.track_key));
   if (!state.queue.length) return toast("No playable YouTube song IDs are available in this mix.");
+  state.playedTrackKeys = new Set();
+  state.restoredPosition = 0;
+  state.queueRestored = false;
+  state.playerNeedsLoad = false;
+  state.stopRequested = false;
+  state.pauseRequested = false;
+  state.lastEndedIndex = null;
+  state.playbackState = "loading";
   updatePlayingInfo();
+  persistQueue();
   state.playerLoading = true;
-  $("#player-status").textContent = "Loading YouTube player…";
+  setPlayerStatus("Loading YouTube player…");
   try {
     const player = await ensurePlayer();
     player.loadPlaylist(state.queue.map(videoId), state.queueIndex);
-    $("#player-status").textContent = "Starting song… If playback pauses, press play inside the player.";
-  } catch (error) { $("#player-status").textContent = error.message; }
+    state.playerNeedsLoad = false;
+    if (typeof player.playVideo === "function") player.playVideo();
+    persistQueue();
+    setPlayerStatus("Starting song… If playback pauses, press play inside the player.");
+    updatePlaybackControls();
+  } catch (error) {
+    state.playbackState = "paused";
+    setPlayerStatus(error.message);
+    updatePlaybackControls();
+  }
   finally { state.playerLoading = false; }
 }
 
@@ -348,16 +836,45 @@ function playMix() {
   return playTrackFrom(items, 0);
 }
 
-function changeTrack(delta) {
-  if (!state.player || state.playerLoading) return;
+async function changeTrack(delta) {
+  if (state.playerLoading || !state.queue.length) return false;
   const index = state.queueIndex + delta;
-  if (index < 0 || index >= state.queue.length) return;
+  if (index < 0 || index >= state.queue.length) return false;
   state.queueIndex = index;
-  state.player.playVideoAt(index);
+  state.restoredPosition = 0;
+  state.lastEndedIndex = null;
   updatePlayingInfo();
+  if (!state.player) return resumePlayback();
+  state.stopRequested = false;
+  state.pauseRequested = false;
+  state.playbackState = "loading";
+  try {
+    if (typeof state.player.playVideoAt !== "function") return resumePlayback();
+    state.player.playVideoAt(index);
+    state.playerNeedsLoad = false;
+    state.playbackState = "playing";
+    setMediaSessionPlaybackState("playing");
+    startPositionUpdates();
+    persistQueue();
+    setPlayerStatus("Starting selected song…");
+    updatePlaybackControls();
+    return true;
+  } catch {
+    state.playbackState = "paused";
+    setPlayerStatus("The selected song could not start. Press Resume to try again.");
+    updatePlaybackControls();
+    return false;
+  }
+}
+
+function isDocumentHidden() {
+  return document.visibilityState === "hidden" || document.hidden === true;
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  ensurePlaybackControls();
+  installMediaSessionHandlers();
+  restoreQueue();
   $("#playlist-name").addEventListener("input", () => { state.playlistNameDirty = true; });
   $("#song-search").addEventListener("input", event => { state.query = event.target.value; renderCollection(); });
   document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => {
@@ -388,6 +905,16 @@ document.addEventListener("DOMContentLoaded", () => {
   refresh();
   // Bridge sync is event-driven in the extension; polling keeps the visible
   // dashboard current without requiring a user refresh or button click.
-  window.setInterval(() => { if (!document.hidden && !state.refreshing) refresh({ silent: true }); }, 30000);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh({ silent: true }); });
+  window.setInterval(() => { if (!isDocumentHidden() && !state.refreshing) refresh({ silent: true }); }, 30000);
+  document.addEventListener("visibilitychange", () => {
+    // Backgrounding is not a playback command. Persist the queue and leave
+    // the iframe/player alone; only the dashboard refresh waits for visibility.
+    persistQueue();
+    if (!isDocumentHidden()) {
+      updatePlaybackControls();
+      refresh({ silent: true });
+    }
+  });
+  window.addEventListener?.("pagehide", persistQueue);
+  window.addEventListener?.("beforeunload", persistQueue);
 });

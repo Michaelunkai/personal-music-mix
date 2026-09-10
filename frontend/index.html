@@ -2,7 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="application-name" content="Personal Music Mix" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Personal Music Mix" />
     <meta name="theme-color" content="#101b2d" />
     <meta name="referrer" content="strict-origin-when-cross-origin" />
     <meta name="description" content="Your private listening room. Discover your personal mix, save favorites, and listen with YouTube." />
@@ -69,11 +73,17 @@
         <p id="taste-copy" class="muted">Loading your favorites…</p>
         <div id="player-frame" hidden><div id="youtube-player"></div></div>
         <p id="player-status" role="status" aria-live="polite">Choose Play on a song, or play the whole mix.</p>
-        <div class="actions player-actions">
-          <button id="previous-track" class="secondary" disabled>Previous</button>
-          <button id="next-track" class="secondary" disabled>Next</button>
+        <div class="actions player-actions" role="group" aria-label="Playback controls">
+          <button id="previous-track" type="button" class="secondary" disabled>Previous</button>
+          <button id="pause-track" type="button" class="primary playback-toggle" data-playback-action="toggle" aria-label="Play current song" aria-pressed="false" disabled>Play</button>
+          <button id="stop-track" type="button" class="secondary" data-playback-action="stop" aria-label="Stop playback" disabled>Stop</button>
+          <button id="next-track" type="button" class="secondary" disabled>Next</button>
           <a id="open-playing" target="_blank" rel="noopener noreferrer" hidden>Open song in YouTube Music ↗</a>
         </div>
+        <p id="background-playback-status" class="playback-note" role="note">
+          <span class="playback-note-title">Background playback</span>
+          <span>Keep this tab open; device controls depend on your browser and YouTube.</span>
+        </p>
         <small class="muted">Playback uses YouTube's player. Some songs may require opening YouTube Music because of availability or embedding restrictions.</small>
       </section>
           <section class="card playlist-card">
