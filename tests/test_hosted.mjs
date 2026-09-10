@@ -438,6 +438,20 @@ test('fresh ranking interleaves distinct taste seeds', () => {
   assert.match(result[0].reasons[0],/Taste root 0/);
 });
 
+test('fresh ranking includes rotated roots outside the scoring frontier', () => {
+  const expiry=Date.now()/1000+3600;
+  const seeds=Array.from({length:14},(_,index)=>(
+    {track_key:`wide-seed-${index}`,title:`Wide root ${index}`,artist:`Root artist ${index}`,video_id:`${String(index).padStart(2,'0')}aaaaaaaaa`,play_count:10,liked_count:0}
+  ));
+  const candidates=seeds.slice(12).flatMap((seed,seedIndex)=>Array.from({length:4},(_,candidateIndex)=>(
+    {track_key:`wide-candidate-${seedIndex}-${candidateIndex}`,title:`Wide candidate ${seedIndex}-${candidateIndex}`,artist:`Wide artist ${seedIndex}`,video_id:`${String(seedIndex+20).padStart(2,'0')}${String(candidateIndex).padStart(9,'0')}`,play_count:0,liked_count:0,source:'favorite_discovery',discovery_seeds:[{track_key:seed.track_key,title:seed.title,seed_kind:'most_listened',play_count:10,liked:false,expires_at:expiry}]}
+  )));
+  const result=rankTracks([...seeds,...candidates],new Set(),8,Date.now(),{unheardOnly:true});
+  assert.equal(result.length,8);
+  assert.ok(result.slice(0,4).every(item=>item.reasons[0].includes('Wide root')));
+  assert.equal(new Set(result.slice(0,4).map(item=>item.reasons[0])).size,2);
+});
+
 test('hosted fresh mix keeps candidates from rotated listening seeds', async () => {
   const env={DB:database()};
   const request=(path,body)=>worker.fetch(new Request(`https://rotated.chatgpt.site${path}`,{

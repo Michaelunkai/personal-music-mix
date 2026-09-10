@@ -143,9 +143,11 @@ function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
     const seedsForRow = seedFor(row);
     if (!seedsForRow.length) continue;
     const seed = seedsForRow[0];
-    candidateSeedKeys.set(row.track_key, seedsForRow
-      .map(value => value.track_key)
-      .filter(key => scoringSeedKeys.has(key)));
+    // Keep every active discovery lineage for diversity. The scoring frontier
+    // controls relevance, but a candidate discovered from a lower-ranked
+    // listening root must still get its own group instead of falling into the
+    // global score tail behind one dominant song.
+    candidateSeedKeys.set(row.track_key, seedsForRow.map(value => value.track_key));
     const frequency = Math.min(1, Math.log1p(seed.play_count) / Math.max(1, Math.log1p(maxPlays)));
     const artistAffinity = Math.min(1, (artistWeights.get(String(row.artist || 'Unknown artist').toLowerCase()) || 0) / maxPlays);
     const favoriteSeed = Boolean(seed.liked) || seed.seed_kind === 'favorite';
@@ -163,7 +165,7 @@ function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
   const strongest = seeds[0];
   for (const row of rows) {
     if (row.source !== 'related' || excluded.has(row.track_key) || excludedVideos.has(row.video_id) || Number(row.play_count || 0) > 0 || hasPlayedEvidence(row.latest_played_at) || liked(row, favorites) || !playable(row) || scored.has(row.track_key) || !strongest) continue;
-    const relatedSeeds = seedFor(row).filter(value => scoringSeedKeys.has(value.track_key));
+    const relatedSeeds = seedFor(row);
     candidateSeedKeys.set(row.track_key, relatedSeeds.map(value => value.track_key));
     const seed = relatedSeeds[0] || strongest;
     let reason = Number(seed.play_count || 0) > 0
@@ -177,7 +179,18 @@ function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
   const ranked = [...scored.values()].sort(order);
   // Interleave distinct seed groups so the first page represents the user's
   // broader taste. A candidate matching multiple seeds is emitted once.
-  const grouped = new Map(seeds.map(seed => [seed.track_key, []]));
+  const grouped = new Map();
+  const groupOrder = [];
+  const addGroup = seedKey => {
+    if (!seedKey || grouped.has(seedKey)) return;
+    grouped.set(seedKey, []);
+    groupOrder.push(seedKey);
+  };
+  for (const seed of seeds) addGroup(seed.track_key);
+  // Candidates can carry valid lineages from rotated or lower-ranked roots
+  // that are outside the twelve-seed scoring frontier. Add those roots after
+  // the frontier so the first page still covers the user's wider taste.
+  for (const keys of candidateSeedKeys.values()) for (const key of keys) addGroup(key);
   for (const item of ranked) {
     for (const seedKey of candidateSeedKeys.get(item.track.track_key) || []) {
       if (grouped.has(seedKey)) grouped.get(seedKey).push(item);
@@ -188,8 +201,8 @@ function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
   const emitted = new Set();
   while (ordered.length < Math.max(1, Math.min(Number(limit) || 20, 200))) {
     let progress = false;
-    for (const seed of seeds) {
-      for (const item of grouped.get(seed.track_key) || []) {
+    for (const seedKey of groupOrder) {
+      for (const item of grouped.get(seedKey) || []) {
         if (emitted.has(item.track.track_key)) continue;
         emitted.add(item.track.track_key);
         ordered.push(item);

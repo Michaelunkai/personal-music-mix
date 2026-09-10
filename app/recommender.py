@@ -235,7 +235,9 @@ class RecommendationEngine:
             *listened_seeds[: max(0, 12 - len(favorite_frontier))],
         ]
         scoring_seed_keys = {str(row["track_key"]) for row in seeds}
-        seed_rows = {str(row["track_key"]): row for row in seeds}
+        all_seed_rows = {
+            str(row["track_key"]): row for row in [*favorite_seeds, *listened_seeds]
+        }
         max_plays = max(1.0, *[_number(row.get("play_count")) for row in seeds])
         artist_weights: dict[str, float] = {}
         for seed in seeds:
@@ -285,11 +287,11 @@ class RecommendationEngine:
             if not seeds_for_row:
                 continue
             seed = seeds_for_row[0]
-            matched_seed_keys = tuple(
-                str(value.get("track_key"))
-                for value in seeds_for_row
-                if str(value.get("track_key")) in scoring_seed_keys
-            )
+            # Keep every active discovery lineage for diversity. The scoring
+            # frontier controls relevance, but lower-ranked or rotated roots
+            # must still receive their own group instead of falling into the
+            # global score tail behind one dominant song.
+            matched_seed_keys = tuple(str(value.get("track_key")) for value in seeds_for_row)
             candidate_seed_keys[key] = matched_seed_keys
             seed_plays = _number(seed.get("play_count"))
             frequency = min(1.0, math.log1p(seed_plays) / max(1.0, math.log1p(max_plays)))
@@ -344,11 +346,12 @@ class RecommendationEngine:
             metadata_key = metadata.get("discovery_seed_key")
             if metadata_key:
                 metadata_keys.append(str(metadata_key))
-            matching_seed_keys = tuple(key for key in metadata_keys if key in scoring_seed_keys)
-            if not matching_seed_keys and strongest_seed:
-                matching_seed_keys = (str(strongest_seed.get("track_key")),)
+            matching_seed_keys = tuple(key for key in metadata_keys if key in all_seed_rows)
+            # Keep the fallback explanation for unannotated connector rows,
+            # but do not place those rows into the strongest seed's diversity
+            # group unless the connector actually identified that lineage.
             candidate_seed_keys[track.track_key] = matching_seed_keys
-            seed_row = seed_rows.get(matching_seed_keys[0]) if matching_seed_keys else strongest_seed
+            seed_row = all_seed_rows.get(matching_seed_keys[0]) if matching_seed_keys else strongest_seed
             seed_title = str((seed_row or {}).get("title") or "your listening history")
             seed_plays = _number((seed_row or {}).get("play_count"))
             reason = (
@@ -357,7 +360,7 @@ class RecommendationEngine:
                 else f"recommended from your favorite: {seed_title}"
             )
             if len(matching_seed_keys) > 1:
-                second_seed = seed_rows.get(matching_seed_keys[1])
+                second_seed = all_seed_rows.get(matching_seed_keys[1])
                 if second_seed:
                     reason += f"; also matches {second_seed.get('title') or 'another favorite'}"
             artist_affinity = min(1.0, artist_weights.get(track.artist.casefold(), 0.0) / max_plays)
@@ -388,7 +391,22 @@ class RecommendationEngine:
         # represent the user's broader taste instead of one dominant history
         # item. Candidates that match multiple seeds participate in each group
         # but are emitted only once.
-        grouped: dict[str, list[Recommendation]] = {key: [] for key in scoring_seed_keys}
+        grouped: dict[str, list[Recommendation]] = {}
+        group_order: list[str] = []
+
+        def add_group(seed_key: str) -> None:
+            if seed_key and seed_key not in grouped:
+                grouped[seed_key] = []
+                group_order.append(seed_key)
+
+        for seed in seeds:
+            add_group(str(seed.get("track_key")))
+        # Candidates may carry valid lineages from rotated or lower-ranked
+        # roots outside the twelve-seed scoring frontier. Add those roots after
+        # the frontier so the first page covers the user's wider taste.
+        for seed_keys in candidate_seed_keys.values():
+            for seed_key in seed_keys:
+                add_group(seed_key)
         for item in ranked:
             for seed_key in candidate_seed_keys.get(item.track.track_key, ()):
                 if seed_key in grouped:
@@ -399,7 +417,7 @@ class RecommendationEngine:
         emitted: set[str] = set()
         while len(ordered) < limit:
             progress = False
-            for seed_key in (str(seed.get("track_key")) for seed in seeds):
+            for seed_key in group_order:
                 for item in grouped.get(seed_key, ()):
                     if item.track.track_key in emitted:
                         continue

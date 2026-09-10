@@ -150,3 +150,52 @@ def test_unheard_mix_interleaves_distinct_taste_seeds():
     assert len(result) == 12
     assert root_counts == {seed["title"]: 2 for seed in seeds}
     assert result[0].reasons[0].endswith("Taste root 0 often")
+
+
+def test_unheard_mix_includes_rotated_roots_outside_scoring_frontier():
+    import time
+
+    expiry = time.time() + 3600
+    seeds = [
+        {
+            "track_key": f"video:{index:011d}",
+            "title": f"Wide root {index}",
+            "artist": f"Root artist {index}",
+            "video_id": f"{index:02d}{'a' * 9}",
+            "play_count": 10,
+            "liked_count": 0,
+        }
+        for index in range(14)
+    ]
+    candidates = []
+    for seed_index, seed in enumerate(seeds[12:]):
+        for candidate_index in range(4):
+            video_id = f"{seed_index + 20:02d}{candidate_index:09d}"
+            candidates.append(
+                {
+                    "track_key": f"wide-candidate:{seed_index}:{candidate_index}",
+                    "title": f"Wide candidate {seed_index}-{candidate_index}",
+                    "artist": f"Wide artist {seed_index}",
+                    "video_id": video_id,
+                    "play_count": 0,
+                    "liked_count": 0,
+                    "source": "favorite_discovery",
+                    "discovery_seeds": [
+                        {
+                            "track_key": seed["track_key"],
+                            "title": seed["title"],
+                            "seed_kind": "most_listened",
+                            "play_count": 10,
+                            "liked": False,
+                            "expires_at": expiry,
+                        }
+                    ],
+                }
+            )
+
+    result = RecommendationEngine().recommend(
+        [*seeds, *candidates], limit=8, exclude_keys=set(), only_unheard=True
+    )
+    assert len(result) == 8
+    assert all("Wide root" in item.reasons[0] for item in result[:4])
+    assert len({item.reasons[0] for item in result[:4]}) == 2
