@@ -73,6 +73,21 @@ test('catalog excludes titles already in the library and never admits a preview 
   sqlite.close();
 });
 
+test('refill continues when the reserve is above its low-water mark but below target',async()=>{
+  const{db,sqlite}=database([{track_key:'video:seed0000001',title:'A song I know',artist:'Signal Artist',play_count:5}]);
+  const insert=sqlite.prepare(`INSERT INTO music_candidates(candidate_key,recording_key,provider,provider_track_id,title,artist,audio_url,provider_url,seed_keys,discovered_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`);
+  for(let i=0;i<201;i++) insert.run(`audius:existing${i}`,`recording:existing:${i}`,'audius',`existing${i}`,`Existing ${i}`,'Existing Artist',
+    `https://api.audius.co/v1/tracks/existing${i}/stream?app_name=personal-music-mix`,`https://api.audius.co/v1/tracks/existing${i}`,'[]','2026-09-16T10:00:00.000Z');
+  const provider=providerFetch();
+  const clock=Date.parse('2026-09-16T10:00:00Z');
+  const result=await refillCatalog(db,{fetchImpl:provider.fetchImpl,now:()=>clock,wait:async()=>{},maxSeeds:1});
+  assert.equal(result.started,true);
+  assert.equal(result.saved_count,2);
+  assert.equal(result.available,203);
+  sqlite.close();
+});
+
 test('explicit feedback on a provider track becomes a future discovery seed',async()=>{
   const{db,sqlite}=database([{track_key:'video:seed0000001',title:'A song I know',artist:'Signal Artist',play_count:5}]);
   const recordingKey=recordingKeyFor('Fresh Favorite','Audius Artist');

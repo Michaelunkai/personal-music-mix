@@ -2,7 +2,7 @@ import { normalizeProviderCandidate, recordingKeyFor } from './domain.js';
 
 export const CATALOG_RESERVE_TARGET = 500;
 export const CATALOG_REFILL_THRESHOLD = 200;
-const MAX_SEEDS_PER_JOB = 2;
+const MAX_SEEDS_PER_JOB = 4;
 const AUDIUS_APP = 'personal-music-mix';
 const CATALOG_LEASE_KEY = 'catalog_refill';
 const CATALOG_CURSOR_KEY = 'catalog_seed_cursor';
@@ -214,7 +214,9 @@ export async function catalogStatus(db, nowMs=Date.now()) {
 export async function refillCatalog(db,{fetchImpl=fetch,now=Date.now,wait=sleep,maxSeeds=MAX_SEEDS_PER_JOB}={}) {
   const started=now();
   const status=await catalogStatus(db,started);
-  if(status.available>=CATALOG_REFILL_THRESHOLD) return {...status,started:false};
+  // Keep filling toward the full reserve. Stopping at the low-water mark
+  // strands a partially replenished catalog and prevents it reaching target.
+  if(status.available>=CATALOG_RESERVE_TARGET) return {...status,started:false};
   const old=await readState(db,CATALOG_LEASE_KEY) || {};
   if(Number(old.lease_until_ms)>started) return {...status,started:false};
   if(Number(old.retry_after_ms)>started) return {...status,started:false};
