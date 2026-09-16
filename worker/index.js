@@ -357,8 +357,8 @@ async function handleApi(request,env,path) {
   connection.companion={online:companionOnline,last_seen_at:companion?.received_at};
   connection.discovery={...companion?.discovery,pending};
   connection.message = !hasTaste ? 'Your saved library is ready. Import YouTube history or likes to start a fresh mix.'
-    : !companionOnline ? 'Your saved mix is ready. Fresh song suggestions will arrive when the local music app reconnects.'
-    : companion?.discovery?.state === 'temporarily_unavailable' ? 'Your saved mix is ready. YouTube recommendations are temporarily unavailable; the local app will retry.'
+    : !companionOnline ? 'Your saved mix is ready. Press Refresh mix to request a fresh batch from hosted music discovery.'
+    : companion?.discovery?.state === 'temporarily_unavailable' ? 'Your saved mix is ready. Some discovery sources are temporarily unavailable; press Refresh mix to retry.'
     : pending ? 'Finding fresh songs from your favorites. Your mix will update automatically when they arrive.'
     : companion?.discovery?.candidate_count > 0 ? 'Fresh songs from your listening signals are ready. Press Refresh mix whenever you want another new batch.'
     : companion?.discovery?.state === 'exhausted' ? 'You have already seen every currently available candidate. Press Refresh mix to request another provider batch.'
