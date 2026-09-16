@@ -83,9 +83,21 @@ function harness(options = {}) {
   };
   const tracks = ['aaaaaaaaaaa', 'bbbbbbbbbbb'].map((id, i) => ({ track: { track_key: `video:${id}`, video_id: id, title: `Song ${i}`, artist: 'Artist' }, score: 0.5 }));
   let playerIndex = 0;
+  const audioListeners = new Map();
+  const audioElement = {
+    src:'',currentTime:0,duration:180,playbackRate:1,paused:true,ended:false,readyState:1,preload:'metadata',hidden:true,
+    addEventListener:(name,listener)=>{const list=audioListeners.get(name)||[];list.push(listener);audioListeners.set(name,list);},
+    dispatch:name=>(audioListeners.get(name)||[]).map(listener=>listener({type:name,target:audioElement})),
+    play(){this.paused=false;this.ended=false;this.dispatch('playing');return Promise.resolve();},
+    pause(){if(this.paused)return;this.paused=true;this.dispatch('pause');},
+    load(){},
+  };
+  nodes.set('#audio-player',audioElement);
+  windowObject.Audio = class { constructor(src){this.src=src;this.preload='';} load(){} };
   windowObject.YT = { Player: class {
     constructor(_id, config) { configs.push(config); Promise.resolve().then(() => config.events.onReady()); }
     loadPlaylist(ids, index) { playerIndex = index; loads.push({ ids: Array.from(ids), index }); playerCalls.push({ method: 'loadPlaylist', ids: Array.from(ids), index }); }
+    loadVideoById(options) { playerCalls.push({ method: 'loadVideoById', ...options }); }
     getPlaylistIndex() { return playerIndex; }
     playVideo() { playerCalls.push({ method: 'playVideo' }); }
     pauseVideo() { playerCalls.push({ method: 'pauseVideo' }); }
@@ -132,7 +144,7 @@ function harness(options = {}) {
   const storageSnapshot = () => Object.fromEntries(storageValues);
   return {
     context, node, nodes, nodeListeners, documentListeners, windowIntervals, fetches, playerCalls,
-    loads, jumps, configs, posts, windowListeners, windowObject, document: documentObject,
+    loads, jumps, configs, posts, windowListeners, windowObject, document: documentObject,audioElement,audioListeners,
     localStorage: storage, mediaSession, click, ready, storageSnapshot,
     setPlayerIndex: index => { playerIndex = index; },
   };
@@ -358,6 +370,75 @@ test('an ended track advances to the next queued song', async () => {
   assert.ok(h.playerCalls.some(call => (call.method === 'playVideoAt' && call.index === 1) || call.method === 'nextVideo'), 'Ended playback did not advance the player');
 });
 
+test('mixed Audius and YouTube queue keeps full audio playing while hidden and exposes device controls', async () => {
+  const h=harness({mediaSession:true});
+  await h.ready();
+  const stream='https://api.audius.co/v1/tracks/audio-track/stream?app_name=personal-music-mix';
+  h.context.mixedItems=[
+    {track:{track_key:'audius:audio-track',provider:'audius',title:'Full song',artist:'Audio artist',audio_url:stream,duration_seconds:180}},
+    h.context.tracks[0],
+  ];
+  await vm.runInContext('playTrackFrom(mixedItems,0)',h.context);
+  assert.equal(vm.runInContext("state.currentSource",h.context),'audius');
+  assert.equal(h.audioElement.paused,false);
+  h.document.hidden=true;h.document.visibilityState='hidden';
+  h.document.dispatchEvent({type:'visibilitychange'});
+  assert.equal(h.audioElement.paused,false,'switching away from the page paused audio');
+  assert.equal(vm.runInContext('seekPlayback(30)',h.context),true);
+  assert.equal(h.audioElement.currentTime,30);
+  await h.mediaSession.handlers.get('pause')();
+  assert.equal(h.audioElement.paused,true);
+  await h.mediaSession.handlers.get('play')();
+  assert.equal(h.audioElement.paused,false);
+  await h.mediaSession.handlers.get('nexttrack')();
+  assert.equal(vm.runInContext('state.currentSource',h.context),'youtube');
+  assert.ok(h.playerCalls.some(call=>call.method==='loadVideoById'&&call.videoId==='aaaaaaaaaaa'));
+  await h.mediaSession.handlers.get('previoustrack')();
+  assert.equal(vm.runInContext('state.currentSource',h.context),'audius');
+  assert.equal(h.audioElement.paused,false);
+  h.audioElement.ended=true;h.audioElement.paused=true;h.audioElement.dispatch('ended');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(vm.runInContext('state.currentSource',h.context),'youtube','natural end did not advance to the next provider');
+});
+
+test('recommendations expose source-aware like and dislike feedback controls', async () => {
+  const h=harness();await h.ready();
+  const track={track_key:'audius:feedback-track',provider:'audius',title:'Feedback song',artist:'Feedback artist',audio_url:'https://api.audius.co/v1/tracks/feedback-track/stream?app_name=personal-music-mix'};
+  h.context.items=[{track}];
+  vm.runInContext('renderRecommendations(items)',h.context);
+  const html=h.node('#recommendations').innerHTML;
+  assert.match(html,/Audius full track/);
+  assert.match(html,/data-feedback="like"/);
+  assert.match(html,/data-feedback="dislike"/);
+  assert.doesNotMatch(html,/data-favorite=/);
+  const requests=[];
+  h.context.fetch=async(url,options={})=>{requests.push({url,body:options.body&&JSON.parse(options.body)});return {ok:true,text:async()=>JSON.stringify({saved:true})};};
+  const button={disabled:false,textContent:'👍 Like',dataset:{feedback:'like',trackKey:track.track_key,provider:'audius',title:track.title,artist:track.artist,duration:'180'},setAttribute(name,value){this[name]=value;}};
+  const target={closest(selector){return selector==='[data-feedback]'?button:null;}};
+  await h.node('#recommendations').dispatchEvent({type:'click',target});
+  assert.equal(requests[0].url,'/api/feedback');
+  assert.equal(requests[0].body.event,'like');
+  assert.equal(requests[0].body.provider,'audius');
+  assert.match(requests[0].body.event_id,/^[A-Za-z0-9_-]{16,100}$/);
+  assert.equal(button.disabled,true);
+  assert.equal(button['aria-pressed'],'true');
+});
+
+test('listening progress is counted from playback and explicit early Next sends skip feedback', async () => {
+  const h=harness();
+  const requests=[];
+  h.context.fetch=async(url,options={})=>{if(url==='/api/feedback')requests.push(JSON.parse(options.body));return {ok:true,text:async()=>JSON.stringify({saved:true})};};
+  h.context.items=[
+    {track:{track_key:'audius:listen-track',provider:'audius',title:'Listening song',artist:'Audio artist',audio_url:'https://api.audius.co/v1/tracks/listen-track/stream?app_name=personal-music-mix',duration_seconds:180}},
+    h.context.tracks[0],
+  ];
+  await vm.runInContext('playTrackFrom(items,0)',h.context);
+  for(let i=0;i<10;i++){h.audioElement.currentTime+=3;vm.runInContext('observePlaybackProgress()',h.context);}
+  assert.ok(requests.some(event=>event.event==='play_progress'&&event.listened_seconds>=30));
+  await vm.runInContext('changeTrack(1)',h.context);
+  assert.ok(requests.some(event=>event.event==='skipped'&&event.listened_seconds>=5));
+});
+
 test('Play mix keeps the saved fresh mix when browsing the library', async () => {
   const h = harness();
   const libraryTrack = { track: { track_key: 'video:ccccccccccc', video_id: 'ccccccccccc', title: 'Library song', artist: 'Other' }, score: 0.2 };
@@ -411,54 +492,44 @@ test('library search and favorites view filter the actual collection', () => {
   assert.equal(vm.runInContext('state.recommendations[0].track.title',h.context),'Song 0');
 });
 
-test('Refresh mix signals the installed bridge before requesting a new batch', async () => {
+test('Refresh uses a stable hosted request without requiring the browser bridge', async () => {
   const h = harness();
-  await vm.runInContext('scan()', h.context);
-  assert.equal(h.posts.length, 1);
-  assert.equal(h.posts[0].message.type, 'ytmusic-personal-mix-refresh');
-  assert.equal(h.posts[0].origin, 'http://127.0.0.1:8000');
-});
-
-test('Refresh remains usable but explains when the live bridge is unavailable', async () => {
-  const h = harness();
-  h.windowObject.postMessage = (message, origin) => {
-    h.posts.push({ message, origin });
-    if (message.type !== 'ytmusic-personal-mix-refresh') return;
-    const result = { type: 'ytmusic-personal-mix-refresh-result', request_id: message.request_id, ok: false, tabs: 0, acknowledged: 0, timed_out: true };
-    h.windowListeners.slice().forEach(listener => listener({ source: h.windowObject, origin, data: result }));
+  const calls=[];
+  h.context.fetch=async(url,options={})=>{
+    if(url==='/api/mix/refresh') {calls.push(JSON.parse(options.body));return {ok:true,text:async()=>JSON.stringify({status:'unavailable',message:'Only 12 new songs are ready; current mix unchanged.'})};}
+    return {ok:true,text:async()=>JSON.stringify({})};
   };
   await vm.runInContext('scan()', h.context);
-  assert.match(h.node('#toast').textContent, /saved history/);
+  assert.equal(calls.length,1);
+  assert.match(calls[0].request_id,/^[A-Za-z0-9_-]{16,100}$/);
+  assert.equal(h.posts.length,0);
+  assert.match(h.node('#toast').textContent,/current mix unchanged/);
 });
 
-test('Refresh uses a returned complete fresh batch without waiting on background discovery', async () => {
+test('Refresh applies a complete 50-song hosted batch without waiting for replenishment', async () => {
   const h = harness();
-  vm.runInContext('globalThis.waitCalls = 0; waitForHostedRefresh = async () => { globalThis.waitCalls += 1; return {}; }', h.context);
-  const original = h.context.fetch;
-  const fullBatch = Array.from({ length: 50 }, (_, index) => ({
-    track: { track_key: `video:full-${String(index).padStart(2, '0')}`, video_id: 'aaaaaaaaaaa', title: `Full song ${index}`, artist: 'Artist' },
-  }));
-  h.context.fetch = async url => {
-    if (url === '/api/scan') return { ok: true, text: async () => JSON.stringify({ status: 'completed', recommendations: fullBatch, preserved_previous_mix: false }) };
-    if (url === '/api/recommendations') return { ok: true, text: async () => JSON.stringify({ items: h.context.tracks }) };
+  const fullBatch=Array.from({length:50},(_,index)=>({track:{track_key:`video:mix-${String(index).padStart(3,'0')}`,video_id:`mix${String(index).padStart(8,'0')}`,title:`Fresh ${index}`,artist:'Artist',provider:'youtube'}}));
+  assert.equal(new Set(fullBatch.map(row=>row.track.video_id)).size,50);
+  const original=h.context.fetch;
+  h.context.fetch=async(url,options={})=>{
+    if(url==='/api/mix/refresh') return {ok:true,text:async()=>JSON.stringify({status:'completed',request_id:JSON.parse(options.body).request_id,recommendations:fullBatch})};
     return original(url);
   };
   await vm.runInContext('scan()', h.context);
-  assert.equal(vm.runInContext('globalThis.waitCalls', h.context), 0);
+  assert.equal(vm.runInContext('state.ranked.length',h.context),50);
+  assert.equal(new Set(vm.runInContext('state.ranked.map(row=>row.track.video_id)',h.context)).size,50);
+  assert.match(h.node('#toast').textContent,/50 new songs/);
 });
 
-test('Refresh waits when only a partial fresh batch arrives', async () => {
+test('an unavailable refresh preserves the current mix instead of showing a partial batch', async () => {
   const h = harness();
   vm.runInContext("state.ranked=[tracks[1]]; state.mixRecommendations=[tracks[1]]; renderCollection()", h.context);
-  vm.runInContext('globalThis.waitCalls = 0; waitForHostedRefresh = async () => { globalThis.waitCalls += 1; return {}; }', h.context);
   const original = h.context.fetch;
-  h.context.fetch = async url => {
-    if (url === '/api/scan') return { ok: true, text: async () => JSON.stringify({ status: 'completed', recommendations: [h.context.tracks[0]] }) };
-    if (url === '/api/recommendations') return { ok: true, text: async () => JSON.stringify({ items: [h.context.tracks[0]] }) };
+  h.context.fetch = async (url,options={}) => {
+    if (url === '/api/mix/refresh') return { ok: true, text: async () => JSON.stringify({status:'unavailable',message:'Only 3 eligible songs are ready. The current mix is unchanged.'}) };
     return original(url);
   };
   await vm.runInContext('scan()', h.context);
-  assert.equal(vm.runInContext('globalThis.waitCalls', h.context), 1);
-  assert.equal(vm.runInContext('state.ranked[0].track.track_key', h.context), 'video:aaaaaaaaaaa');
-  assert.notEqual(vm.runInContext('state.ranked[0].track.track_key', h.context), 'video:bbbbbbbbbbb');
+  assert.equal(vm.runInContext('state.ranked[0].track.track_key', h.context), 'video:bbbbbbbbbbb');
+  assert.match(h.node('#toast').textContent,/current mix is unchanged/);
 });

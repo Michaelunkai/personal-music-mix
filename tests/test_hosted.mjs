@@ -9,6 +9,9 @@ function database() {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(readFileSync(new URL('../drizzle/0000_lively_gressill.sql', import.meta.url), 'utf8'));
   sqlite.exec(readFileSync(new URL('../drizzle/0001_durable_served_ledger.sql', import.meta.url), 'utf8'));
+  sqlite.exec(readFileSync(new URL('../drizzle/0002_thick_praxagora.sql', import.meta.url), 'utf8').split('--> statement-breakpoint').join('\n'));
+  sqlite.exec(readFileSync(new URL('../drizzle/0003_curly_xorn.sql', import.meta.url), 'utf8').split('--> statement-breakpoint').join('\n'));
+  sqlite.exec(readFileSync(new URL('../drizzle/0004_conscious_boom_boom.sql', import.meta.url), 'utf8').split('--> statement-breakpoint').join('\n'));
   const prepare = (sql, args=[]) => ({
     bind(...values) { return prepare(sql,values); },
     async first() { return sqlite.prepare(sql).get(...args) || null; },

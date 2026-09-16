@@ -15,6 +15,27 @@
       "when": 1788892800000,
       "tag": "0001_durable_served_ledger",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789565353267,
+      "tag": "0002_thick_praxagora",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1789566292184,
+      "tag": "0003_curly_xorn",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1789567076458,
+      "tag": "0004_conscious_boom_boom",
+      "breakpoints": true
     }
   ]
 }

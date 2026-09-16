@@ -72,6 +72,7 @@
         </div>
         <p id="taste-copy" class="muted">Loading your favorites…</p>
         <div id="player-frame" hidden><div id="youtube-player"></div></div>
+        <audio id="audio-player" preload="metadata" controls hidden aria-label="Full-track audio player"></audio>
         <p id="player-status" role="status" aria-live="polite">Choose Play on a song, or play the whole mix.</p>
         <div class="actions player-actions" role="group" aria-label="Playback controls">
           <button id="previous-track" type="button" class="secondary" disabled>Previous</button>
@@ -82,9 +83,9 @@
         </div>
         <p id="background-playback-status" class="playback-note" role="note">
           <span class="playback-note-title">Background playback</span>
-          <span>Keep this tab open; device controls depend on your browser and YouTube.</span>
+          <span>Full Audius tracks can keep playing in the background. Use your device media controls; YouTube-only songs follow YouTube's playback restrictions.</span>
         </p>
-        <small class="muted">Playback uses YouTube's player. Some songs may require opening YouTube Music because of availability or embedding restrictions.</small>
+        <small class="muted">Full-track audio and YouTube playback use their respective providers. YouTube may require opening the song in YouTube Music.</small>
       </section>
           <section class="card playlist-card">
             <p class="eyebrow">PLAYLIST BUILDER</p>

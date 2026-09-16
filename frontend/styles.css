@@ -72,6 +72,8 @@ input:focus { border-color:var(--accent-2); box-shadow:0 0 0 3px rgba(130,169,25
 .player-actions { justify-content:flex-start; align-items:center; margin-bottom:16px; }
 #player-frame { margin:18px 0; max-width:720px; }
 #player-frame iframe { width:100%; aspect-ratio:16/9; min-height:200px; border:0; border-radius:12px; }
+#audio-player { display:block; width:100%; max-width:720px; margin:18px 0; accent-color:var(--accent); }
+#audio-player[hidden] { display:none; }
 [hidden] { display:none !important; }
 .track-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
 .track-actions button { padding:8px 12px; font-size:.8rem; }

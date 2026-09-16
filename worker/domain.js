@@ -1,3 +1,75 @@
+export const MUSIC_PROVIDERS = Object.freeze(['youtube', 'audius']);
+export const MUSIC_FEEDBACK_EVENTS = Object.freeze(['play_progress', 'completed', 'skipped', 'like', 'dislike']);
+
+function safeIdentityPart(value, maxLength = 200) {
+  return String(value || '').normalize('NFKC').trim().toLocaleLowerCase('en-US')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ').trim().slice(0, maxLength);
+}
+
+export function recordingKeyFor(title, artist) {
+  const normalizedTitle = safeIdentityPart(title);
+  const normalizedArtist = safeIdentityPart(artist);
+  if (!normalizedTitle || !normalizedArtist || normalizedArtist === 'unknown artist') return null;
+  return `recording:${normalizedArtist}:${normalizedTitle}`.slice(0, 500);
+}
+
+export function normalizeProviderCandidate(row, now = new Date().toISOString()) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+  const provider = row.provider === 'audius' ? 'audius' : null;
+  const providerTrackId = String(row.provider_track_id ?? row.id ?? '');
+  const title = String(row.title || '').trim().slice(0, 500);
+  const artist = String(row.artist ?? row.user?.name ?? '').trim().slice(0, 500);
+  const recordingKey = recordingKeyFor(title, artist);
+  if (!provider || !/^[A-Za-z0-9_-]{1,80}$/.test(providerTrackId) || !recordingKey || row.is_streamable !== true
+    || row.is_stream_gated === true || row.is_preview_only === true) return null;
+  const apiOrigin = 'https://api.audius.co';
+  const trackId = encodeURIComponent(providerTrackId);
+  const providerUrl = `${apiOrigin}/v1/tracks/${trackId}`;
+  const audioUrl = `${apiOrigin}/v1/tracks/${trackId}/stream?app_name=personal-music-mix`;
+  const duration = Number(row.duration_seconds ?? row.duration);
+  const artwork = String(row.artwork_url ?? row.artwork?.['150x150'] ?? '').trim();
+  return {
+    candidate_key: `audius:${providerTrackId}`,
+    recording_key: recordingKey,
+    provider,
+    provider_track_id: providerTrackId,
+    title,
+    artist,
+    album: String(row.album || '').trim().slice(0, 500),
+    genre: String(row.genre || '').trim().slice(0, 160),
+    mood: String(row.mood || '').trim().slice(0, 100),
+    duration_seconds: Number.isFinite(duration) && duration > 0 && duration < 7200 ? duration : null,
+    audio_url: audioUrl,
+    provider_url: providerUrl,
+    artwork_url: /^https:\/\/[^/]+\//.test(artwork) ? artwork.slice(0, 1200) : null,
+    seed_keys: Array.isArray(row.seed_keys) ? [...new Set(row.seed_keys.filter(key => typeof key === 'string' && key.length <= 300))].slice(0, 8) : [],
+    discovered_at: now,
+  };
+}
+
+export function normalizeFeedback(payload, now = new Date().toISOString()) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const eventId = String(payload.event_id || '');
+  const trackKey = String(payload.track_key || '');
+  const provider = MUSIC_PROVIDERS.includes(payload.provider) ? payload.provider : null;
+  const event = MUSIC_FEEDBACK_EVENTS.includes(payload.event) ? payload.event : null;
+  if (!/^[A-Za-z0-9_-]{16,100}$/.test(eventId) || !trackKey || trackKey.length > 300 || !provider || !event) return null;
+  const listened = Number(payload.listened_seconds);
+  const duration = Number(payload.duration_seconds);
+  const recordingKey = recordingKeyFor(payload.title, payload.artist);
+  if (!recordingKey) return null;
+  return {
+    event_id: eventId,
+    track_key: trackKey,
+    recording_key: recordingKey,
+    provider,
+    event,
+    listened_seconds: Number.isFinite(listened) ? Math.max(0, Math.min(7200, Math.floor(listened))) : 0,
+    duration_seconds: Number.isFinite(duration) && duration > 0 ? Math.min(7200, Math.floor(duration)) : null,
+    created_at: now,
+  };
+}
+
 export function normalizeImport(payload) {
   if (!payload || !Array.isArray(payload.tracks) || payload.tracks.length > 10000) throw new Error('Expected up to 10,000 library tracks');
   const keys = new Set();
@@ -10,6 +82,8 @@ export function normalizeImport(payload) {
     return {
       track_key: key, title: String(row.title).slice(0, 500), artist: String(row.artist || 'Unknown artist').slice(0, 500),
       album: String(row.album || '').slice(0, 500), video_id: /^[\w-]{11}$/.test(row.video_id || '') ? row.video_id : null,
+      genre: String(row.genre || '').slice(0, 160), mood: String(row.mood || '').slice(0, 100),
+      recording_key: recordingKeyFor(row.title, row.artist || 'Unknown artist'), provider: 'youtube',
       url: String(row.url || '').slice(0, 1000), play_count: count(row.play_count),
       liked_count: count(row.provider_liked_count ?? (count(row.liked_count) - (row.local_favorite ? 1 : 0))),
       like_events: count(row.like_events), latest_played_at: row.latest_played_at || null, history_position: position(row.history_position),
@@ -72,6 +146,7 @@ function hasPlayedEvidence(value) {
 function playable(row) { return /^[A-Za-z0-9_-]{11}$/.test(String(row.video_id || '')); }
 
 function historyPosition(row) {
+  if (row?.history_position === null || row?.history_position === undefined || String(row.history_position).trim() === '') return Number.POSITIVE_INFINITY;
   const value = Number(row?.history_position);
   return Number.isFinite(value) && value >= 0 ? value : Number.POSITIVE_INFINITY;
 }
@@ -129,9 +204,11 @@ function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
       const source = seed.source;
       const currentLiked = source ? liked(source, favorites) : Boolean(seed.liked);
       const currentPlayCount = source ? Number(source.play_count || 0) : Number(seed.play_count || 0);
-      const currentHistoryPosition = source && Number.isFinite(Number(source.history_position))
+      const currentHistoryPosition = source && source.history_position !== null && source.history_position !== undefined
+        && String(source.history_position).trim() !== '' && Number.isFinite(Number(source.history_position))
         ? Number(source.history_position)
-        : Number.isFinite(Number(seed.history_position)) ? Number(seed.history_position) : historyPosition(source);
+        : seed.history_position !== null && seed.history_position !== undefined && String(seed.history_position).trim() !== ''
+          && Number.isFinite(Number(seed.history_position)) ? Number(seed.history_position) : historyPosition(source);
       return {...seed,
         title:String(source?.title || seed.title || 'a song you enjoy'),
         play_count:currentPlayCount,
@@ -140,7 +217,7 @@ function rankUnheard(rows, favorites, limit, excluded, excludedVideos) {
         history_position:currentHistoryPosition,
       };
     })
-    .sort((a,b) => Number(scoringSeedKeys.has(a.track_key)) - Number(scoringSeedKeys.has(b.track_key))
+    .sort((a,b) => Number(scoringSeedKeys.has(b.track_key)) - Number(scoringSeedKeys.has(a.track_key))
       || Number(b.liked) - Number(a.liked)
       || Number(b.play_count || 0) - Number(a.play_count || 0)
       || compareHistoryPosition(a, b)

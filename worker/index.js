@@ -1,7 +1,9 @@
 import html from '../frontend/index.html?raw';
 import css from '../frontend/styles.css?raw';
 import script from '../frontend/app.js?raw';
-import { normalizeImport, rankTracks } from './domain.js';
+import { normalizeImport, normalizeFeedback, recordingKeyFor, rankTracks } from './domain.js';
+import { catalogStatus, refillCatalog } from './discovery.js';
+import { refreshFreshMix } from './fresh-mix.js';
 
 const now = () => new Date().toISOString();
 const json = (body, status=200) => Response.json(body, {status, headers:{'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'}});
@@ -70,8 +72,12 @@ async function reserveFreshItems(db, items) {
   }
   if (!candidates.length) return {items:[],reservationId};
   try {
-    await db.batch(candidates.map(item => db.prepare('INSERT OR IGNORE INTO music_served(track_key,video_id,served_at,reservation_id) VALUES(?,?,?,?)')
-      .bind(trackKey(item),trackVideoId(item),now(),reservationId)));
+    await db.batch(candidates.map(item => {
+      const track=item.track||item;
+      const recordingKey=track.recording_key||recordingKeyFor(track.title,track.artist);
+      return db.prepare('INSERT OR IGNORE INTO music_served(track_key,video_id,recording_key,served_at,reservation_id) VALUES(?,?,?,?,?)')
+        .bind(trackKey(item),trackVideoId(item),recordingKey,now(),reservationId);
+    }));
     const {results} = await db.prepare('SELECT track_key,video_id FROM music_served WHERE reservation_id=?').bind(reservationId).all();
     const reserved = new Set((results || []).map(row => `${row.track_key}\u0000${row.video_id}`));
     return {items:candidates.filter(item => reserved.has(`${trackKey(item)}\u0000${trackVideoId(item)}`)),reservationId};
@@ -84,9 +90,11 @@ async function recordServedKeys(db, keys, rows = []) {
   const rowsByKey = new Map(rows.map(row => [row.track_key, row]));
   const unique = [...asKeys(keys)];
   const statements = unique.map(key => {
-    const videoId = rowsByKey.get(key)?.video_id;
-    return db.prepare('INSERT OR IGNORE INTO music_served(track_key,video_id,served_at,reservation_id) VALUES(?,?,?,NULL)')
-      .bind(key,playableVideoId(videoId) ? videoId : null,now());
+    const track=rowsByKey.get(key);
+    const videoId=track?.video_id;
+    const recordingKey=track?.recording_key||recordingKeyFor(track?.title,track?.artist);
+    return db.prepare('INSERT OR IGNORE INTO music_served(track_key,video_id,recording_key,served_at,reservation_id) VALUES(?,?,?, ?,NULL)')
+      .bind(key,playableVideoId(videoId)?videoId:null,recordingKey,now());
   });
   for (let index = 0; index < statements.length; index += 200) await db.batch(statements.slice(index,index + 200));
   return unique.length;
@@ -150,7 +158,8 @@ async function rebuildUnlocked(db) {
     excludeKeys:new Set([...currentServed.keys, ...previousKeys]),
     excludeVideoIds:new Set([...currentServed.videos, ...previousVideos]),
   });
-  await db.prepare("DELETE FROM music_served WHERE reservation_id IS NOT NULL AND julianday(served_at) < julianday('now','-15 minutes')").run();
+  await db.prepare(`DELETE FROM music_served WHERE reservation_id IS NOT NULL AND julianday(served_at) < julianday('now','-15 minutes')
+    AND NOT EXISTS(SELECT 1 FROM music_mix_requests r WHERE r.request_id=music_served.reservation_id AND r.state='completed')`).run();
   let served = await servedLedger(db,rows);
   let rankedItems = rankTracks(rows,favorites,FRESH_MIX_LIMIT,Date.now(),{unheardOnly:true,...freshExclusions(served)});
   // The durable unique video index is the reservation boundary.  It closes
@@ -248,6 +257,34 @@ async function handleApi(request,env,path) {
     });
     return json(result);
   }
+  if(path === '/api/catalog' && method === 'GET') {
+    const [catalog, aggregate] = await Promise.all([
+      catalogStatus(db),
+      db.prepare('SELECT COUNT(*) AS count FROM music_feedback').first(),
+    ]);
+    return json({catalog,feedback_events:Math.max(0,Number(aggregate?.count)||0)});
+  }
+  if(path === '/api/mix/refresh' && method === 'POST') {
+    const result=await refreshFreshMix(db,await body());
+    return json(result.body,result.httpStatus);
+  }
+  if(path === '/api/feedback' && method === 'POST') {
+    const payload=await body();
+    const event=normalizeFeedback(payload);
+    if(!event) return json({detail:'A valid listening event is required'},422);
+    const results=await db.batch([
+      db.prepare(`INSERT OR IGNORE INTO music_feedback(event_id,track_key,recording_key,provider,event,listened_seconds,duration_seconds,created_at)
+        VALUES(?,?,?,?,?,?,?,?)`).bind(event.event_id,event.track_key,event.recording_key,event.provider,event.event,event.listened_seconds,event.duration_seconds,event.created_at),
+      db.prepare(`DELETE FROM music_candidate_origins WHERE candidate_key IN (SELECT candidate_key FROM music_candidates WHERE recording_key=?)
+        AND EXISTS(SELECT 1 FROM music_feedback WHERE event_id=? AND recording_key=? AND event='dislike')`)
+        .bind(event.recording_key,event.event_id,event.recording_key),
+      db.prepare(`DELETE FROM music_candidates WHERE recording_key=?
+        AND EXISTS(SELECT 1 FROM music_feedback WHERE event_id=? AND recording_key=? AND event='dislike')`)
+        .bind(event.recording_key,event.event_id,event.recording_key),
+    ]);
+    const inserted=Number(results?.[0]?.meta?.changes||results?.[0]?.meta?.rows_written||0)>0;
+    return json({saved:true,duplicate:!inserted,event:event.event,recording_key:event.recording_key});
+  }
   if (path === '/api/sync/import' && method === 'POST') {
     const payload = await body(); const tracks = normalizeImport(payload);
     if (!tracks.length) return json({detail:'An empty import will not replace your library'},422);
@@ -334,9 +371,19 @@ async function handleApi(request,env,path) {
 }
 
 export default {
-  async fetch(request,env) {
+  async fetch(request,env,ctx) {
     const path = new URL(request.url).pathname;
     try {
+      if(path === '/api/catalog' && request.method === 'GET') {
+        const response=await handleApi(request,env,path);
+        if(response.ok && env.DB && typeof ctx?.waitUntil === 'function') ctx.waitUntil(refillCatalog(env.DB).catch(()=>null));
+        return response;
+      }
+      if(path === '/api/mix/refresh' && request.method === 'POST') {
+        const response=await handleApi(request,env,path);
+        if(env.DB&&typeof ctx?.waitUntil==='function') ctx.waitUntil(refillCatalog(env.DB).catch(()=>null));
+        return response;
+      }
       if(path.startsWith('/api/')) return await handleApi(request,env,path);
       const asset = path === '/' ? [html,'text/html'] : path === '/static/app.js' ? [script,'text/javascript'] : path === '/static/styles.css' ? [css,'text/css'] : null;
       if(!asset) return new Response('Not found',{status:404});
